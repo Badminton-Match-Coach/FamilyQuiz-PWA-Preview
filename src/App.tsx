@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, 
@@ -47,9 +47,11 @@ import {
 import { Participant, QuizConfig, AnswerRecord, UserType, Question, QuestionType, Location } from './types';
 import { defaultQuiz } from './data/defaultQuiz';
 import { AdminMapPicker, ParticipantMap, RouteGeoTagModal, calculateDistanceMeters, formatDistance } from './components/MapComponent';
-import { generateQuizClient, getStoredApiKey, setStoredApiKey } from './geminiClient';
+import { generateQuizClient, getStoredApiKey, setStoredApiKey, validateTextAnswerWithGemini } from './geminiClient';
 import { Language, SUPPORTED_LANGUAGES, detectLanguage, t, translateQuestion } from './i18n';
 import { subscribeTranslationCache, requestQuestionTranslations, registerQuestionTranslation } from './translationCache';
+import { evaluateTextAnswer, soundex, detectLinguisticLanguage } from './utils/soundex';
+import { compressQuizToUrlCode, generateQuizDirectUrl, decompressQuizFromUrlCode } from './utils/quizCompression';
 import { 
   SavedQuizRecord, 
   saveQuizToIndexedDB, 
@@ -240,12 +242,11 @@ export default function App() {
     message: string;
   } | null>(null);
 
-  const MAX_UNLOCK_DISTANCE_METERS = 35; // 35 meters radius
-
   const handleSelectQuestionIndex = (idx: number) => {
     const bQ = quizConfig.barnQuestions[idx];
     const vQ = quizConfig.vuxenQuestions[idx];
     const location = bQ?.location || vQ?.location;
+    const unlockDistance = Math.max(5, quizConfig.geotagUnlockDistance || 20);
 
     if (location) {
       if (!userLocation) {
@@ -258,17 +259,17 @@ export default function App() {
       }
 
       const dist = calculateDistanceMeters(userLocation.lat, userLocation.lng, location.lat, location.lng);
-      if (dist > MAX_UNLOCK_DISTANCE_METERS) {
+      if (dist > unlockDistance) {
         setLockNotice({
           questionIndex: idx,
           distanceMeters: dist,
-          message: `Du är ${formatDistance(dist)} från stationen. Du behöver gå närmare (inom ${MAX_UNLOCK_DISTANCE_METERS} meter) för att låsa upp fråga ${idx + 1}!`,
+          message: `Du är ${formatDistance(dist)} från stationen. Du behöver gå närmare (inom ${unlockDistance} meter) för att låsa upp fråga ${idx + 1}!`,
         });
         return;
       }
     }
 
-    // Question is non-geotagged or within 35m -> open question!
+    // Question is non-geotagged or within unlock radius -> open question!
     setSelectedQuestionIndex(idx);
     setSelectedParticipantId(null);
     setLockNotice(null);
@@ -279,7 +280,8 @@ export default function App() {
   const [slideDirection, setSlideDirection] = useState<number>(1);
   const touchStartX = useRef<number | null>(null);
   const touchStartY = useRef<number | null>(null);
-  const [showCreateQuestionModal, setShowCreateQuestionModal] = useState<UserType | null>(null);
+  const [showCreateQuestionModal, setShowCreateQuestionModal] = useState<UserType | 'båda' | null>(null);
+  const [createModalCategory, setCreateModalCategory] = useState<'barn' | 'vuxen' | 'båda'>('barn');
   const [showRouteGeoTagModal, setShowRouteGeoTagModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [configMasterPasswordInput, setConfigMasterPasswordInput] = useState('');
@@ -289,7 +291,7 @@ export default function App() {
   const [showConfigInput, setShowConfigInput] = useState(false);
   const [configJsonInput, setConfigJsonInput] = useState('');
   const [editingQuestionsCategory, setEditingQuestionsCategory] = useState<UserType>('barn');
-  const [configTab, setConfigTab] = useState<'questions' | 'ai' | 'db' | 'general'>('questions');
+  const [configTab, setConfigTab] = useState<'questions' | 'ai' | 'db' | 'general' | 'library'>('questions');
   const [savedQuizzes, setSavedQuizzes] = useState<SavedQuizRecord[]>([]);
   const [dbNotification, setDbNotification] = useState<string | null>(null);
   const [isSavingToDb, setIsSavingToDb] = useState(false);
@@ -328,6 +330,7 @@ export default function App() {
     setQuizConfig(record.quizConfig);
     setNewQuizTitle(record.quizConfig.title);
     setNewQuizPassword(record.quizConfig.password || '');
+    setNewGeotagDistance(record.quizConfig.geotagUnlockDistance || 20);
     setDbNotification(`${t(lang, 'quizLoadedSuccess')} ("${record.title}")`);
     setTimeout(() => setDbNotification(null), 4000);
   };
@@ -405,13 +408,18 @@ export default function App() {
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
   const [newQuizPassword, setNewQuizPassword] = useState('');
   const [newQuizTitle, setNewQuizTitle] = useState('');
+  const [newGeotagDistance, setNewGeotagDistance] = useState<number>(() => quizConfig.geotagUnlockDistance || 20);
   const [importTarget, setImportTarget] = useState<'barn' | 'vuxen' | 'båda'>('båda');
   const [showFacit, setShowFacit] = useState(false);
   const [facitPasswordInput, setFacitPasswordInput] = useState('');
   const [isFacitUnlocked, setIsFacitUnlocked] = useState(false);
   const [copiedConfigCode, setCopiedConfigCode] = useState(false);
   const [copiedAppUrlCode, setCopiedAppUrlCode] = useState(false);
+  const [copiedDirectUrlCode, setCopiedDirectUrlCode] = useState(false);
+  const [directUrlLength, setDirectUrlLength] = useState<number | null>(null);
   const [pointsInputValue, setPointsInputValue] = useState<number>(0);
+  const [textInputValue, setTextInputValue] = useState<string>('');
+  const [editorTestWord, setEditorTestWord] = useState<string>('');
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [showSettingsHelp, setShowSettingsHelp] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -742,6 +750,9 @@ ${exampleJson}`;
         if (q && q.type === 'points') {
           const ans = answers.find(a => a.participantId === selectedParticipantId && a.questionIndex === selectedQuestionIndex);
           setPointsInputValue(typeof ans?.pointsScored === 'number' ? ans.pointsScored : 0);
+        } else if (q && q.type === 'text') {
+          const ans = answers.find(a => a.participantId === selectedParticipantId && a.questionIndex === selectedQuestionIndex);
+          setTextInputValue(ans?.textAnswer || '');
         }
       }
     }
@@ -918,6 +929,7 @@ ${exampleJson}`;
     if (view === 'config') {
       setNewQuizPassword(quizConfig.password || '');
       setNewQuizTitle(quizConfig.title || '');
+      setNewGeotagDistance(quizConfig.geotagUnlockDistance || 20);
     }
   }, [view, quizConfig]);
 
@@ -999,7 +1011,200 @@ ${exampleJson}`;
     setSelectedQuestionIndex(null);
   };
 
+  const submitTextAnswer = (rawUserText: string) => {
+    if (!selectedParticipantId || selectedQuestionIndex === null) return;
+
+    const participant = participants.find(p => p.id === selectedParticipantId);
+    if (!participant) return;
+
+    const questions = participant.type === 'barn' ? quizConfig.barnQuestions : quizConfig.vuxenQuestions;
+    const question = questions[selectedQuestionIndex];
+    if (!question) return;
+
+    const targetLang = question.originalLanguage || lang;
+    const evalResult = evaluateTextAnswer(
+      rawUserText,
+      question.correctTextAnswer || '',
+      question.acceptedTextAnswers || [],
+      targetLang
+    );
+
+    const targetPartId = selectedParticipantId;
+    const targetQIdx = selectedQuestionIndex;
+
+    const newAnswer: AnswerRecord = {
+      participantId: targetPartId,
+      questionIndex: targetQIdx,
+      textAnswer: rawUserText.trim(),
+      isCorrect: evalResult.isCorrect,
+      timestamp: Date.now()
+    };
+
+    const existingIndex = answers.findIndex(a => a.participantId === targetPartId && a.questionIndex === targetQIdx);
+    if (existingIndex > -1) {
+      const newAnswers = [...answers];
+      newAnswers[existingIndex] = newAnswer;
+      setAnswers(newAnswers);
+    } else {
+      setAnswers([...answers, newAnswer]);
+    }
+
+    // Optional AI Linguistic Engine check when online with Gemini key if initial offline test was inconclusive
+    const storedApiKey = getStoredApiKey();
+    if (!evalResult.isCorrect && storedApiKey && typeof navigator !== 'undefined' && navigator.onLine) {
+      validateTextAnswerWithGemini({
+        userInput: rawUserText,
+        targetWord: question.correctTextAnswer || '',
+        acceptedAlternatives: question.acceptedTextAnswers || [],
+        language: targetLang,
+        apiKey: storedApiKey
+      }).then(aiResult => {
+        if (aiResult.match) {
+          setAnswers(prev => prev.map(a => 
+            (a.participantId === targetPartId && a.questionIndex === targetQIdx)
+              ? { ...a, isCorrect: true }
+              : a
+          ));
+        }
+      }).catch(() => {
+        // Silently preserve offline engine result on network/API errors
+      });
+    }
+
+    setSelectedParticipantId(null);
+    setSelectedQuestionIndex(null);
+  };
+
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  const processImportConfig = (rawInput: string) => {
+    try {
+      // Clean markdown code blocks if wrapped
+      let cleanInput = rawInput
+        .replace(/^```(?:json|text|markdown)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+      // Check for compressed URL format or code (e.g. ?quiz=..., #quiz=..., or raw compressed string)
+      let compressedCode = '';
+      if (cleanInput.includes('quiz=')) {
+        const match = cleanInput.match(/[?#&]quiz=([^&#\s]+)/);
+        if (match && match[1]) {
+          compressedCode = decodeURIComponent(match[1]);
+        }
+      } else if (cleanInput.startsWith('z=') || cleanInput.startsWith('Z=')) {
+        compressedCode = cleanInput;
+      }
+
+      if (compressedCode) {
+        const decompressed = decompressQuizFromUrlCode(compressedCode);
+        if (decompressed) {
+          setQuizConfig(decompressed);
+          localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(decompressed));
+          setShowConfigInput(false);
+          setConfigJsonInput('');
+          alert(t(lang, 'importSuccess'));
+          return;
+        }
+      }
+
+      let jsonCandidate = cleanInput;
+
+      // If it doesn't look like JSON array '[' or object '{', try decryption/base64 decoding
+      if (!jsonCandidate.startsWith('{') && !jsonCandidate.startsWith('[')) {
+        const decryptedDollar = xorDecrypt(rawInput, '$');
+        const decDollarTrim = decryptedDollar.trim();
+        if (decDollarTrim.startsWith('{') || decDollarTrim.startsWith('[')) {
+          jsonCandidate = decDollarTrim;
+        } else {
+          const decryptedPassword = xorDecrypt(rawInput, 'Password');
+          const decPassTrim = decryptedPassword.trim();
+          if (decPassTrim.startsWith('{') || decPassTrim.startsWith('[')) {
+            jsonCandidate = decPassTrim;
+          } else {
+            const directBase64 = tryBase64Decode(rawInput);
+            if (directBase64) {
+              const base64Trim = directBase64.trim();
+              if (base64Trim.startsWith('{') || base64Trim.startsWith('[')) {
+                jsonCandidate = base64Trim;
+              }
+            }
+          }
+        }
+      }
+
+      // Try parsing JSON if candidate starts with '{' or '['
+      if (jsonCandidate.startsWith('{') || jsonCandidate.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(jsonCandidate);
+          
+          // Case 1: Full Quiz Config with barnQuestions and vuxenQuestions
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.barnQuestions && parsed.vuxenQuestions) {
+            const ensureLang = (qs: any[]) => (qs || []).map(q => ({
+              ...q,
+              originalLanguage: q.originalLanguage || lang || 'sv'
+            }));
+            setQuizConfig({
+              ...parsed,
+              barnQuestions: ensureLang(parsed.barnQuestions),
+              vuxenQuestions: ensureLang(parsed.vuxenQuestions)
+            });
+            setShowConfigInput(false);
+            setConfigJsonInput('');
+            setAnswers([]);
+            setParticipants([]);
+            setView('setup');
+            alert(t(lang, 'importClearedAlert'));
+            return;
+          }
+
+          // Case 2: Array of questions [{ text, options, correctAnswer }, ...]
+          let questionArray: any[] | null = null;
+          if (Array.isArray(parsed)) {
+            questionArray = parsed;
+          } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.questions)) {
+            questionArray = parsed.questions;
+          } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed[importTarget + 'Questions'])) {
+             // Specific category
+             questionArray = parsed[importTarget + 'Questions'];
+          }
+
+          if (questionArray) {
+            const formattedQuestions: Question[] = questionArray.map((q, idx) => ({
+              id: Math.random().toString(36).substr(2, 9),
+              text: q.text || q.question || `${t(lang, 'question')} ${idx + 1}`,
+              options: Array.isArray(q.options) && q.options.map(String).length > 0 ? q.options.map(String) : [t(lang, 'defaultOption1'), t(lang, 'defaultOptionX'), t(lang, 'defaultOption2')],
+              correctAnswers: Array.isArray(q.correctAnswers) ? q.correctAnswers : (typeof q.correctAnswer === 'number' ? [q.correctAnswer] : [0]),
+              originalLanguage: q.originalLanguage || lang || 'sv'
+            }));
+
+            applyQuestionsToConfig(formattedQuestions);
+            return;
+          }
+        } catch (jsonErr) {
+          console.warn('JSON parsing failed, falling back to text parsing', jsonErr);
+        }
+      }
+      
+      // Otherwise, parse as plain text
+      let newQuestions = parseQuizText(cleanInput);
+      if (newQuestions.length === 0) {
+        const base64DecodedText = tryBase64Decode(rawInput);
+        if (base64DecodedText) {
+          newQuestions = parseQuizText(base64DecodedText);
+        }
+      }
+      
+      if (newQuestions.length > 0) {
+        applyQuestionsToConfig(newQuestions);
+      } else {
+        alert(t(lang, 'invalidFormatAlert'));
+      }
+    } catch (err) {
+      console.error('Import error:', err);
+      alert(t(lang, 'invalidFormatAlert'));
+    }
+  };
 
   const resetQuiz = () => {
     setShowResetConfirm(true);
@@ -1138,6 +1343,76 @@ ${exampleJson}`;
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [numberSelectionInput, setNumberSelectionInput] = useState('');
 
+  // Quiz Library state
+  const [quizLibrary, setQuizLibrary] = useState<any[]>([]);
+  const [isLibraryLoading, setIsLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+
+  const fetchQuizLibrary = async () => {
+    try {
+      setIsLibraryLoading(true);
+      setLibraryError(null);
+      const res = await fetch('/quizzes/manifest.json');
+      if (res.ok) {
+        const data = await res.json();
+        setQuizLibrary(data);
+      } else {
+        setLibraryError('Failed to fetch manifest');
+      }
+    } catch (err) {
+      console.error('Failed to load quiz library', err);
+      setLibraryError('Network error');
+    } finally {
+      setIsLibraryLoading(false);
+    }
+  };
+
+  const loadLibraryQuiz = async (filename: string) => {
+    try {
+      const res = await fetch(`/quizzes/${filename}`);
+      if (!res.ok) throw new Error('File not found');
+      const content = await res.text();
+      processImportConfig(content);
+    } catch (err) {
+      console.error('Error loading library quiz:', err);
+      alert(t(lang, 'libraryError'));
+    }
+  };
+
+  useEffect(() => {
+    fetchQuizLibrary();
+    
+    // Check URL query parameters or URL hash for compressed quiz: ?quiz=... or #quiz=...
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashStr = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+    const hashParams = new URLSearchParams(hashStr);
+
+    const compressedParam = searchParams.get('quiz') || hashParams.get('quiz');
+    if (compressedParam) {
+      try {
+        const decompressed = decompressQuizFromUrlCode(compressedParam);
+        if (decompressed) {
+          setQuizConfig(decompressed);
+          localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(decompressed));
+          // Clean the URL to avoid reloading on refresh while keeping clean UX
+          if (window.history && window.history.replaceState) {
+            const cleanUrl = window.location.origin + window.location.pathname;
+            window.history.replaceState(null, '', cleanUrl);
+          }
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to load quiz from URL parameters:', err);
+      }
+    }
+
+    // URL Parameter auto-load: ?quizFile=filename.txt
+    const quizFile = searchParams.get('quizFile');
+    if (quizFile) {
+      loadLibraryQuiz(quizFile);
+    }
+  }, []);
+
   // Clear selected question IDs when switching active editing category
   useEffect(() => {
     setSelectedQuestionIds([]);
@@ -1229,20 +1504,22 @@ ${exampleJson}`;
     setQuestionToDelete(null);
   };
 
-  const addNewQuestion = (category: UserType, type: QuestionType = 'options') => {
+  const addNewQuestion = (category: UserType | 'båda', type: QuestionType = 'options') => {
     const newQuestion: Question = {
       id: crypto.randomUUID(),
       type,
-      text: type === 'points' ? 'Ny poängfråga...' : 'Ny fråga...',
-      options: type === 'points' ? [] : ['Svar 1', 'Svar X', 'Svar 2'],
-      correctAnswers: type === 'points' ? [] : [0],
+      text: type === 'points' ? 'Ny poängfråga...' : type === 'text' ? 'Ny textfråga...' : 'Ny fråga...',
+      options: type === 'points' || type === 'text' ? [] : ['Svar 1', 'Svar X', 'Svar 2'],
+      correctAnswers: type === 'points' || type === 'text' ? [] : [0],
       maxPoints: type === 'points' ? 10 : undefined,
+      correctTextAnswer: type === 'text' ? 'Rätt svar' : undefined,
+      acceptedTextAnswers: type === 'text' ? [] : undefined,
       originalLanguage: lang,
     };
     
     setQuizConfig(prev => {
       const newConfig = { ...prev };
-      if (type === 'points') {
+      if (category === 'båda') {
         newConfig.barnQuestions = [...newConfig.barnQuestions, newQuestion];
         newConfig.vuxenQuestions = [...newConfig.vuxenQuestions, { ...newQuestion }];
       } else if (category === 'barn') {
@@ -1344,110 +1621,9 @@ ${exampleJson}`;
   };
 
   const handleImportConfig = () => {
-    try {
-      let rawInput = configJsonInput.trim();
-      if (!rawInput) return;
-
-      // Clean markdown code blocks if wrapped
-      let cleanInput = rawInput
-        .replace(/^```(?:json|text|markdown)?\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      let jsonCandidate = cleanInput;
-
-      // If it doesn't look like JSON array '[' or object '{', try decryption/base64 decoding
-      if (!jsonCandidate.startsWith('{') && !jsonCandidate.startsWith('[')) {
-        const decryptedDollar = xorDecrypt(rawInput, '$');
-        const decDollarTrim = decryptedDollar.trim();
-        if (decDollarTrim.startsWith('{') || decDollarTrim.startsWith('[')) {
-          jsonCandidate = decDollarTrim;
-        } else {
-          const decryptedPassword = xorDecrypt(rawInput, 'Password');
-          const decPassTrim = decryptedPassword.trim();
-          if (decPassTrim.startsWith('{') || decPassTrim.startsWith('[')) {
-            jsonCandidate = decPassTrim;
-          } else {
-            const directBase64 = tryBase64Decode(rawInput);
-            if (directBase64) {
-              const base64Trim = directBase64.trim();
-              if (base64Trim.startsWith('{') || base64Trim.startsWith('[')) {
-                jsonCandidate = base64Trim;
-              }
-            }
-          }
-        }
-      }
-
-      // Try parsing JSON if candidate starts with '{' or '['
-      if (jsonCandidate.startsWith('{') || jsonCandidate.startsWith('[')) {
-        try {
-          const parsed = JSON.parse(jsonCandidate);
-          
-          // Case 1: Full Quiz Config with barnQuestions and vuxenQuestions
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.barnQuestions && parsed.vuxenQuestions) {
-            const ensureLang = (qs: any[]) => (qs || []).map(q => ({
-              ...q,
-              originalLanguage: q.originalLanguage || lang || 'sv'
-            }));
-            setQuizConfig({
-              ...parsed,
-              barnQuestions: ensureLang(parsed.barnQuestions),
-              vuxenQuestions: ensureLang(parsed.vuxenQuestions)
-            });
-            setShowConfigInput(false);
-            setConfigJsonInput('');
-            setAnswers([]);
-            setParticipants([]);
-            setView('setup');
-            alert(t(lang, 'importClearedAlert'));
-            return;
-          }
-
-          // Case 2: Array of questions [{ text, options, correctAnswer }, ...]
-          let questionArray: any[] | null = null;
-          if (Array.isArray(parsed)) {
-            questionArray = parsed;
-          } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.questions)) {
-            questionArray = parsed.questions;
-          } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed[importTarget + 'Questions'])) {
-            questionArray = parsed[importTarget + 'Questions'];
-          }
-
-          if (questionArray && questionArray.length > 0) {
-            const formattedQuestions: Question[] = questionArray.map((q, idx) => ({
-              id: q.id || crypto.randomUUID(),
-              text: q.text || q.question || `${t(lang, 'question')} ${idx + 1}`,
-              options: Array.isArray(q.options) && q.options.map(String).length > 0 ? q.options.map(String) : [t(lang, 'defaultOption1'), t(lang, 'defaultOptionX'), t(lang, 'defaultOption2')],
-              correctAnswers: Array.isArray(q.correctAnswers) ? q.correctAnswers : (typeof q.correctAnswer === 'number' ? [q.correctAnswer] : [0]),
-              originalLanguage: q.originalLanguage || lang || 'sv'
-            }));
-
-            applyQuestionsToConfig(formattedQuestions);
-            return;
-          }
-        } catch (jsonErr) {
-          console.warn('JSON parsing failed, falling back to text parsing', jsonErr);
-        }
-      }
-      
-      // Otherwise, parse as plain text
-      let newQuestions = parseQuizText(cleanInput);
-      if (newQuestions.length === 0) {
-        const base64DecodedText = tryBase64Decode(rawInput);
-        if (base64DecodedText) {
-          newQuestions = parseQuizText(base64DecodedText);
-        }
-      }
-
-      if (newQuestions.length > 0) {
-        applyQuestionsToConfig(newQuestions);
-      } else {
-        alert(t(lang, 'noQuestionsFoundAlert'));
-      }
-    } catch (e) {
-      alert(t(lang, 'couldNotReadInputAlert'));
-    }
+    let rawInput = configJsonInput.trim();
+    if (!rawInput) return;
+    processImportConfig(rawInput);
   };
 
   const [aiTopic, setAiTopic] = useState('');
@@ -1510,8 +1686,19 @@ ${exampleJson}`;
     });
   };
 
+  const shareDirectQuizUrl = () => {
+    const directUrl = generateQuizDirectUrl(quizConfig);
+    setDirectUrlLength(directUrl.length);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(directUrl).then(() => {
+        setCopiedDirectUrlCode(true);
+        setTimeout(() => setCopiedDirectUrlCode(false), 6000);
+      });
+    }
+  };
+
   const shareAppUrl = () => {
-    const appUrl = 'https://badminton-match-coach.github.io/FamilyQuiz-PWA/';
+    const appUrl = 'https://badminton-match-coach.github.io/FamilyQuiz-PWA-Preview/';
     navigator.clipboard.writeText(appUrl).then(() => {
       setCopiedAppUrlCode(true);
       setTimeout(() => setCopiedAppUrlCode(false), 6000);
@@ -1528,13 +1715,13 @@ ${exampleJson}`;
     <div className="min-h-screen bg-indigo-600 text-slate-900 font-sans p-3 sm:p-4 md:p-8 flex flex-col">
       <div className="fixed inset-x-0 top-0 z-[200] bg-slate-950/85 backdrop-blur-sm border-b border-white/10 shadow-md">
         <a
-          href="https://badminton-match-coach.github.io/FamilyQuiz-PWA/"
+          href="https://badminton-match-coach.github.io/FamilyQuiz-PWA-Preview/"
           target="_blank"
           rel="noreferrer"
           className="block max-w-5xl mx-auto px-2 py-1.5 text-center text-[8px] sm:text-[10px] font-black tracking-[0.08em] text-indigo-100 hover:text-white transition-colors truncate"
-          title="https://badminton-match-coach.github.io/FamilyQuiz-PWA/"
+          title="https://badminton-match-coach.github.io/FamilyQuiz-PWA-Preview/"
         >
-          https://Badminton-Match-Coach.github.io/FamilyQuiz-PWA/
+          https://Badminton-Match-Coach.github.io/FamilyQuiz-PWA-Preview/
         </a>
       </div>
 
@@ -1675,7 +1862,10 @@ ${exampleJson}`;
               </button>
 
               <button 
-                onClick={() => setShowConfigInput(true)}
+                onClick={() => {
+                  setShowConfigInput(true);
+                  setConfigTab('library');
+                }}
                 className="flex-1 px-3 py-2.5 bg-emerald-400 hover:bg-emerald-300 text-slate-950 rounded-xl font-black text-xs flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95 shrink-0"
                 title="Importera färdigt quiz"
               >
@@ -1934,6 +2124,7 @@ ${exampleJson}`;
                             })}
                             userType={participants[0]?.type || 'barn'}
                             userLocation={userLocation}
+                            unlockDistance={quizConfig.geotagUnlockDistance || 20}
                             onSelectQuestion={handleSelectQuestionIndex}
                           />
                         </div>
@@ -1980,7 +2171,8 @@ ${exampleJson}`;
                           dist = calculateDistanceMeters(userLocation.lat, userLocation.lng, location.lat, location.lng);
                         }
 
-                        const isUnlocked = isFullyAnswered || !location || (dist !== null && dist <= MAX_UNLOCK_DISTANCE_METERS);
+                        const unlockDistance = Math.max(5, quizConfig.geotagUnlockDistance || 20);
+                        const isUnlocked = isFullyAnswered || !location || (dist !== null && dist <= unlockDistance);
 
                         return (
                           <button
@@ -2020,6 +2212,8 @@ ${exampleJson}`;
                                         <span className="bg-emerald-100 text-emerald-700 text-[9px] font-black px-1.5 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1 shrink-0">
                                           {sampleQ?.type === 'points' 
                                             ? `🎯 ${t(lang, 'pointQuestion')}` 
+                                            : sampleQ?.type === 'text'
+                                            ? `🔤 ${sampleQ.correctTextAnswer || ''}`
                                             : `${t(lang, 'correctAnswer')}: ${(sampleQ?.correctAnswers || []).map(ans => ans === 0 ? '1' : ans === 1 ? 'X' : '2').join(', ')}`}
                                         </span>
                                       )}
@@ -2057,7 +2251,7 @@ ${exampleJson}`;
                                   <span>📍</span>
                                   <span>
                                     {dist !== null 
-                                      ? `${formatDistance(dist)} ${dist <= MAX_UNLOCK_DISTANCE_METERS ? t(lang, 'withinRange') : t(lang, 'lockedDistance')}`
+                                      ? `${formatDistance(dist)} ${dist <= unlockDistance ? t(lang, 'withinRange') : t(lang, 'lockedDistance')}`
                                       : t(lang, 'requiresGPS')}
                                   </span>
                                 </div>
@@ -2119,7 +2313,8 @@ ${exampleJson}`;
                           dist = calculateDistanceMeters(userLocation.lat, userLocation.lng, location.lat, location.lng);
                         }
 
-                        const isUnlocked = isFullyAnswered || !location || (dist !== null && dist <= MAX_UNLOCK_DISTANCE_METERS);
+                        const unlockDistance = Math.max(5, quizConfig.geotagUnlockDistance || 20);
+                        const isUnlocked = isFullyAnswered || !location || (dist !== null && dist <= unlockDistance);
                         const isSelected = selectedQuestionIndex === idx;
 
                         return (
@@ -2346,6 +2541,54 @@ ${exampleJson}`;
                                   <span>{t(lang, 'savePointsBtn', { points: pointsInputValue.toString() })}</span>
                                 </button>
                               </div>
+                            ) : activeQ.type === 'text' ? (
+                              <div className="bg-sky-50/80 border-4 border-sky-200 rounded-[2rem] p-6 sm:p-8 space-y-6 text-center shadow-lg">
+                                <div className="space-y-1">
+                                  <div className="inline-flex items-center gap-2 bg-sky-600 text-white px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider shadow-sm">
+                                    <span>🔤</span>
+                                    <span>{t(lang, 'textQuestionType')}</span>
+                                  </div>
+                                  <p className="text-xs sm:text-sm text-slate-600 font-semibold pt-2">
+                                    {t(lang, 'answeringAs', { name: currentParticipant?.name || '' })}
+                                  </p>
+                                  <p className="text-xs text-sky-700 font-medium">
+                                    {t(lang, 'soundexOfflineNote')}
+                                  </p>
+                                </div>
+
+                                <div className="space-y-3 max-w-md mx-auto">
+                                  <input
+                                    type="text"
+                                    value={textInputValue}
+                                    onChange={(e) => setTextInputValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' && textInputValue.trim()) {
+                                        submitTextAnswer(textInputValue);
+                                      }
+                                    }}
+                                    placeholder={t(lang, 'textAnswerPlaceholder')}
+                                    className="w-full p-4 sm:p-5 bg-white border-4 border-sky-400 focus:border-sky-600 rounded-2xl text-center text-lg sm:text-xl font-black text-slate-800 shadow-inner outline-none transition-all placeholder:text-slate-300 placeholder:font-bold"
+                                    autoFocus
+                                  />
+
+                                  {isFacitUnlocked && activeQ.correctTextAnswer && (
+                                    <div className="p-3 bg-emerald-100 border border-emerald-300 rounded-xl text-xs font-bold text-emerald-800 flex items-center justify-center gap-2">
+                                      <span>✅ {t(lang, 'correctAnswer')}:</span>
+                                      <span className="font-black underline">{activeQ.correctTextAnswer}</span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <button
+                                  type="button"
+                                  disabled={!textInputValue.trim()}
+                                  onClick={() => submitTextAnswer(textInputValue)}
+                                  className="w-full py-4 sm:py-5 bg-sky-500 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-black text-base sm:text-lg uppercase shadow-xl shadow-sky-200 active:scale-95 transition-all flex items-center justify-center gap-2"
+                                >
+                                  <CheckCircle2 className="w-5 h-5 stroke-[3]" />
+                                  <span>{t(lang, 'submitTextAnswerBtn')}</span>
+                                </button>
+                              </div>
                             ) : (
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 flex-1">
                                 {activeQ.options.map((opt, idx) => {
@@ -2519,6 +2762,54 @@ ${exampleJson}`;
                         );
                       }
 
+                      if (question.type === 'text') {
+                        return (
+                          <div key={idx} className="p-4 sm:p-5 rounded-xl sm:rounded-2xl bg-sky-50/60 border border-sky-200/80 space-y-3">
+                            <div className="flex justify-between gap-4">
+                              <h4 className="font-bold text-slate-800 text-xs sm:text-sm leading-tight">
+                                <span className="text-sky-600 mr-2">{idx + 1}.</span>
+                                {question.text}
+                              </h4>
+                              <div className="shrink-0">
+                                {answer ? (
+                                  answer.isCorrect ? (
+                                    <div className="flex items-center gap-1 text-emerald-600 font-black text-[8px] sm:text-[10px] uppercase bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-100">
+                                      <CheckCircle2 className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                                      {t(lang, 'correct')}
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-1 text-rose-600 font-black text-[8px] sm:text-[10px] uppercase bg-rose-50 px-2 py-1 rounded-lg border border-rose-100">
+                                      <span className="w-2.5 h-2.5 sm:w-3 sm:h-3 flex items-center justify-center">×</span>
+                                      {t(lang, 'wrong')}
+                                    </div>
+                                  )
+                                ) : (
+                                  <span className="text-[9px] font-bold text-slate-400 italic bg-slate-100 px-2 py-1 rounded-lg">
+                                    {t(lang, 'notAnsweredBadge')}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            
+                            <div className="space-y-2 text-xs">
+                              <div className="p-3 bg-white rounded-xl border border-sky-100 flex items-center justify-between">
+                                <span className="font-bold text-slate-600">{t(lang, 'participantAnswerLabel')}:</span>
+                                <span className="font-black text-slate-800 text-sm">
+                                  {answer?.textAnswer || <span className="italic text-slate-400 font-normal">{t(lang, 'notAnsweredBadge')}</span>}
+                                </span>
+                              </div>
+
+                              {isFacitUnlocked && question.correctTextAnswer && (
+                                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between text-emerald-900">
+                                  <span className="font-bold">{t(lang, 'correctAnswer')}:</span>
+                                  <span className="font-black text-sm">{question.correctTextAnswer}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+
                       return (
                         <div key={idx} className="p-4 sm:p-5 rounded-xl sm:rounded-2xl bg-slate-50 border border-slate-100 space-y-3">
                           <div className="flex justify-between gap-4">
@@ -2599,80 +2890,93 @@ ${exampleJson}`;
                         const hasOptionQuestions = allQuestions.some(q => (q.type || 'options') === 'options');
                         const hasPointQuestions = allQuestions.some(q => q.type === 'points');
 
-                        return participants
+                        const mappedParticipants = participants
                           .map(p => {
                             const pAnswers = answers.filter(a => a.participantId === p.id);
                             const score = pAnswers.filter(a => a.isCorrect === true).length;
                             const totalPoints = pAnswers.filter(a => typeof a.pointsScored === 'number').reduce((sum, a) => sum + (a.pointsScored || 0), 0);
                             const total = pAnswers.length;
 
+                            let finalScore = score;
+                            if (hasOptionQuestions && hasPointQuestions) {
+                              finalScore = score + totalPoints;
+                            } else if (hasPointQuestions) {
+                              finalScore = totalPoints;
+                            }
+
                             return {
                               ...p,
                               score,
                               totalPoints,
-                              total
+                              total,
+                              finalScore
                             };
                           })
                           .sort((a, b) => {
-                            if (hasOptionQuestions && hasPointQuestions) {
-                              return (b.score + b.totalPoints) - (a.score + a.totalPoints);
-                            } else if (hasPointQuestions) {
-                              return b.totalPoints - a.totalPoints;
-                            } else {
-                              return b.score - a.score;
+                            if (b.finalScore !== a.finalScore) {
+                              return b.finalScore - a.finalScore;
                             }
-                          })
-                          .map((p, idx) => (
-                            <button 
-                              key={p.id} 
-                              onClick={() => setViewingParticipantId(p.id)}
-                              className={`w-full flex items-center justify-between p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-4 transition-all hover:scale-[1.02] active:scale-95 ${
-                                idx === 0 ? 'bg-indigo-600 text-white border-indigo-800 shadow-xl' : 'bg-slate-50 border-slate-100 text-slate-800'
-                              }`}
-                            >
-                              <div className="flex items-center gap-3 sm:gap-4 text-left min-w-0">
-                                <span className={`text-xl sm:text-2xl font-black shrink-0 ${idx === 0 ? 'text-yellow-300' : 'text-slate-300'}`}>#{idx + 1}</span>
-                                <div className="min-w-0">
-                                  <span className="font-black text-lg sm:text-xl block leading-none truncate">{p.name}</span>
-                                  <span className={`text-[9px] sm:text-[10px] font-bold uppercase tracking-widest ${idx === 0 ? 'text-indigo-200' : 'text-slate-400'}`}>
-                                    {p.type === 'barn' ? t(lang, 'kid') : t(lang, 'adult')} • {p.total} {t(lang, 'answered')}
-                                  </span>
+                            // Vid lika poäng delas platsen (sortera alfabetiskt för stabil ordning)
+                            return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+                          });
+
+                        return mappedParticipants
+                          .map((p) => {
+                            const rank = mappedParticipants.filter(other => other.finalScore > p.finalScore).length + 1;
+                            const isFirstPlace = rank === 1;
+
+                            return (
+                              <button 
+                                key={p.id} 
+                                onClick={() => setViewingParticipantId(p.id)}
+                                className={`w-full flex items-center justify-between p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-4 transition-all hover:scale-[1.02] active:scale-95 ${
+                                  isFirstPlace ? 'bg-indigo-600 text-white border-indigo-800 shadow-xl' : 'bg-slate-50 border-slate-100 text-slate-800'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3 sm:gap-4 text-left min-w-0">
+                                  <span className={`text-xl sm:text-2xl font-black shrink-0 ${isFirstPlace ? 'text-yellow-300' : 'text-slate-300'}`}>#{rank}</span>
+                                  <div className="min-w-0">
+                                    <span className="font-black text-lg sm:text-xl block leading-none truncate">{p.name}</span>
+                                    <span className={`text-[9px] sm:text-[10px] font-bold uppercase tracking-widest ${isFirstPlace ? 'text-indigo-200' : 'text-slate-400'}`}>
+                                      {p.type === 'barn' ? t(lang, 'kid') : t(lang, 'adult')} • {p.total} {t(lang, 'answered')}
+                                    </span>
+                                  </div>
                                 </div>
-                              </div>
 
-                              <div className="flex items-center gap-2 sm:gap-4 shrink-0">
-                                <div className="text-right flex items-center gap-2 sm:gap-3">
-                                  {hasOptionQuestions && (
-                                    <div className="text-right">
-                                      {(isFacitUnlocked || isAdmin) ? (
-                                        <>
-                                          <span className="text-xl sm:text-3xl font-black">{p.score}</span>
-                                          <span className={`text-[10px] sm:text-xs font-bold opacity-75 ml-1 ${idx === 0 ? 'text-indigo-100' : 'text-slate-500'}`}>{t(lang, 'correct')}</span>
-                                        </>
-                                      ) : (
-                                        <div className="flex items-center gap-1.5 opacity-80">
-                                          <Lock className={`w-3.5 h-3.5 sm:w-4 sm:h-4 inline-block ${idx === 0 ? 'text-indigo-200' : 'text-slate-400'}`} />
-                                          <span className={`text-xs sm:text-sm font-bold ${idx === 0 ? 'text-indigo-100' : 'text-slate-400'}`}>🔒</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
+                                <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+                                  <div className="text-right flex items-center gap-2 sm:gap-3">
+                                    {hasOptionQuestions && (
+                                      <div className="text-right">
+                                        {(isFacitUnlocked || isAdmin) ? (
+                                          <>
+                                            <span className="text-xl sm:text-3xl font-black">{p.score}</span>
+                                            <span className={`text-[10px] sm:text-xs font-bold opacity-75 ml-1 ${isFirstPlace ? 'text-indigo-100' : 'text-slate-500'}`}>{t(lang, 'correct')}</span>
+                                          </>
+                                        ) : (
+                                          <div className="flex items-center gap-1.5 opacity-80">
+                                            <Lock className={`w-3.5 h-3.5 sm:w-4 sm:h-4 inline-block ${isFirstPlace ? 'text-indigo-200' : 'text-slate-400'}`} />
+                                            <span className={`text-xs sm:text-sm font-bold ${isFirstPlace ? 'text-indigo-100' : 'text-slate-400'}`}>🔒</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
 
-                                  {hasOptionQuestions && hasPointQuestions && (
-                                    <span className={`text-lg sm:text-xl font-black ${idx === 0 ? 'text-indigo-300' : 'text-slate-300'}`}>+</span>
-                                  )}
+                                    {hasOptionQuestions && hasPointQuestions && (
+                                      <span className={`text-lg sm:text-xl font-black ${isFirstPlace ? 'text-indigo-300' : 'text-slate-300'}`}>+</span>
+                                    )}
 
-                                  {hasPointQuestions && (
-                                    <div className="text-right">
-                                      <span className={`text-xl sm:text-3xl font-black ${idx === 0 ? 'text-yellow-300' : 'text-amber-600'}`}>{p.totalPoints}</span>
-                                      <span className={`text-[10px] sm:text-xs font-bold opacity-80 ml-1 ${idx === 0 ? 'text-indigo-100' : 'text-amber-700'}`}>{t(lang, 'pointsTotal')}</span>
-                                    </div>
-                                  )}
+                                    {hasPointQuestions && (
+                                      <div className="text-right">
+                                        <span className={`text-xl sm:text-3xl font-black ${isFirstPlace ? 'text-yellow-300' : 'text-amber-600'}`}>{p.totalPoints}</span>
+                                        <span className={`text-[10px] sm:text-xs font-bold opacity-80 ml-1 ${isFirstPlace ? 'text-indigo-100' : 'text-amber-700'}`}>{t(lang, 'pointsTotal')}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <ChevronRight className={`w-4 h-4 sm:w-5 sm:h-5 ${isFirstPlace ? 'text-white/40' : 'text-slate-300'}`} />
                                 </div>
-                                <ChevronRight className={`w-4 h-4 sm:w-5 sm:h-5 ${idx === 0 ? 'text-white/40' : 'text-slate-300'}`} />
-                              </div>
-                            </button>
-                          ));
+                              </button>
+                            );
+                          });
                       })()}
                     </div>
 
@@ -2792,6 +3096,26 @@ ${exampleJson}`;
                                             </span>
                                           )}
                                         </div>
+                                      ) : q.type === 'text' ? (
+                                        <div className="p-4 bg-sky-50 rounded-2xl text-xs border border-sky-200 text-sky-950 space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <span className="font-black flex items-center gap-1.5">
+                                              <span>🔤</span> {t(lang, 'textQuestionType')}
+                                            </span>
+                                            <span className="bg-sky-200 text-sky-900 px-2 py-0.5 rounded-lg text-[10px] font-black">
+                                              {t(lang, 'soundexPhoneticTag')}
+                                            </span>
+                                          </div>
+                                          <div className="bg-white p-3 rounded-xl border border-sky-200 flex items-center justify-between">
+                                            <span className="font-bold text-slate-600">{t(lang, 'correctAnswer')}:</span>
+                                            <span className="font-black text-emerald-700 text-sm">{q.correctTextAnswer || '—'}</span>
+                                          </div>
+                                          {q.acceptedTextAnswers && q.acceptedTextAnswers.length > 0 && (
+                                            <div className="text-[11px] text-slate-500 font-medium">
+                                              <span className="font-bold">{t(lang, 'acceptedAlternativesLabel')}:</span> {q.acceptedTextAnswers.join(', ')}
+                                            </div>
+                                          )}
+                                        </div>
                                       ) : (
                                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                                           {q.options.map((opt, oIdx) => (
@@ -2850,6 +3174,26 @@ ${exampleJson}`;
                                             <span className="bg-amber-200 text-amber-950 px-2 py-0.5 rounded-lg text-[10px] font-black">
                                               Max: {q.maxPoints} p
                                             </span>
+                                          )}
+                                        </div>
+                                      ) : q.type === 'text' ? (
+                                        <div className="p-4 bg-sky-50 rounded-2xl text-xs border border-sky-200 text-sky-950 space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <span className="font-black flex items-center gap-1.5">
+                                              <span>🔤</span> {t(lang, 'textQuestionType')}
+                                            </span>
+                                            <span className="bg-sky-200 text-sky-900 px-2 py-0.5 rounded-lg text-[10px] font-black">
+                                              {t(lang, 'soundexPhoneticTag')}
+                                            </span>
+                                          </div>
+                                          <div className="bg-white p-3 rounded-xl border border-sky-200 flex items-center justify-between">
+                                            <span className="font-bold text-slate-600">{t(lang, 'correctAnswer')}:</span>
+                                            <span className="font-black text-emerald-700 text-sm">{q.correctTextAnswer || '—'}</span>
+                                          </div>
+                                          {q.acceptedTextAnswers && q.acceptedTextAnswers.length > 0 && (
+                                            <div className="text-[11px] text-slate-500 font-medium">
+                                              <span className="font-bold">{t(lang, 'acceptedAlternativesLabel')}:</span> {q.acceptedTextAnswers.join(', ')}
+                                            </div>
                                           )}
                                         </div>
                                       ) : (
@@ -2989,7 +3333,19 @@ ${exampleJson}`;
                 </div>
 
                   {/* Navigation Tabs */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200/60">
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200/60">
+                    <button
+                      onClick={() => setConfigTab('general')}
+                      className={`py-3 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
+                        configTab === 'general' 
+                          ? 'bg-white text-indigo-600 shadow-md border border-indigo-100' 
+                          : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <Settings className="w-4 h-4" />
+                      <span>{t(lang, 'generalTab')}</span>
+                    </button>
+
                     <button
                       onClick={() => setConfigTab('questions')}
                       className={`py-3 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
@@ -3000,9 +3356,18 @@ ${exampleJson}`;
                     >
                       <HelpCircle className="w-4 h-4" />
                       <span>{t(lang, 'questionsTab')}</span>
-                      <span className="hidden sm:inline-block text-[10px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full font-black">
-                        {quizConfig.barnQuestions.length + quizConfig.vuxenQuestions.length}
-                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setConfigTab('library')}
+                      className={`py-3 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
+                        configTab === 'library' 
+                          ? 'bg-white text-indigo-600 shadow-md border border-indigo-100' 
+                          : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                      <span>{t(lang, 'libraryTab')}</span>
                     </button>
 
                     {isAdmin && (
@@ -3030,19 +3395,92 @@ ${exampleJson}`;
                       <Database className="w-4 h-4" />
                       <span>{t(lang, 'dbTab')}</span>
                     </button>
-
-                    <button
-                      onClick={() => setConfigTab('general')}
-                      className={`py-3 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
-                        configTab === 'general' 
-                          ? 'bg-white text-indigo-600 shadow-md border border-indigo-100' 
-                          : 'text-slate-500 hover:text-slate-800'
-                      } ${!isAdmin ? 'col-span-1' : ''}`}
-                    >
-                      <Edit2 className="w-4 h-4" />
-                      <span>{t(lang, 'generalTab')}</span>
-                    </button>
                   </div>
+
+                  {/* TAB: LIBRARY & CATALOG */}
+                  {configTab === 'library' && (
+                    <div className="space-y-6">
+                      {/* Catalog Header */}
+                      <div className="bg-gradient-to-br from-indigo-50 to-slate-50 p-6 rounded-3xl border border-indigo-100 shadow-sm space-y-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-md shrink-0">
+                            <FolderOpen className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h3 className="font-black text-base text-slate-800">{t(lang, 'libraryHeading')}</h3>
+                            <p className="text-xs text-slate-500 font-medium leading-relaxed">{t(lang, 'libraryDesc')}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Manifest List */}
+                      <div className="space-y-3">
+                        {isLibraryLoading ? (
+                          <div className="p-12 text-center text-slate-400 font-bold flex flex-col items-center gap-4">
+                            <div className="w-8 h-8 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                            <p className="text-sm">{t(lang, 'loadingLibrary')}</p>
+                          </div>
+                        ) : libraryError ? (
+                          <div className="p-8 text-center text-rose-500 font-bold bg-rose-50 rounded-3xl border border-rose-100 flex flex-col items-center gap-2">
+                            <p>{t(lang, 'libraryError')}</p>
+                            <button 
+                              onClick={fetchQuizLibrary}
+                              className="px-4 py-1.5 bg-rose-100 hover:bg-rose-200 rounded-full text-[10px] uppercase font-black transition-all active:scale-95"
+                            >
+                              {t(lang, 'retryBtn') || 'Retry'}
+                            </button>
+                          </div>
+                        ) : quizLibrary.length === 0 ? (
+                          <div className="p-10 text-center text-slate-400 font-bold bg-slate-50 rounded-3xl border border-slate-200/60">
+                            <Database className="w-8 h-8 mx-auto mb-3 opacity-20" />
+                            <p className="text-sm">{t(lang, 'libraryEmpty')}</p>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto pr-1">
+                            {quizLibrary.map(item => (
+                              <div key={item.id} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm hover:border-indigo-300 transition-all space-y-3 flex flex-col group">
+                                <div className="flex-1">
+                                  <h4 className="font-black text-slate-800 text-sm group-hover:text-indigo-600 transition-colors">{item.title}</h4>
+                                  <p className="text-[11px] text-slate-500 font-medium line-clamp-2 mt-1 leading-relaxed">{item.description}</p>
+                                </div>
+                                <button 
+                                  onClick={() => loadLibraryQuiz(item.filename)}
+                                  className="w-full py-2.5 bg-indigo-50 hover:bg-indigo-600 hover:text-white text-indigo-700 rounded-xl font-black text-[10px] uppercase transition-all active:scale-95 flex items-center justify-center gap-2"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  <span>{t(lang, 'loadQuizBtn')}</span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Manual Import Box (Pasted Code) */}
+                      <div className="pt-5 border-t border-slate-100 space-y-4">
+                        <div className="flex items-center justify-between px-1">
+                           <h3 className="font-black text-[10px] uppercase tracking-widest text-slate-400">{t(lang, 'importPastedJsonBtn')}</h3>
+                        </div>
+                        <div className="p-5 bg-slate-50 rounded-[2rem] border border-slate-200/70 space-y-4">
+                          <textarea 
+                            rows={2}
+                            value={configJsonInput}
+                            onChange={(e) => setConfigJsonInput(e.target.value)}
+                            placeholder={t(lang, 'pasteAiResponsePlaceholder')}
+                            className="w-full p-4 bg-white border border-slate-200 rounded-2xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+                          />
+                          <button
+                            onClick={handleImportConfig}
+                            disabled={!configJsonInput.trim()}
+                            className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-2xl font-black text-xs uppercase tracking-wider shadow-lg shadow-emerald-100 transition-all active:scale-95 flex items-center justify-center gap-2.5"
+                          >
+                            <Sparkles className="w-4 h-4 text-emerald-200" />
+                            <span>{t(lang, 'importPastedJsonBtn')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* TAB 1: QUESTIONS EDITOR */}
                   {configTab === 'questions' && (
@@ -3258,7 +3696,10 @@ ${exampleJson}`;
 
                       {isAdmin && (
                         <button 
-                          onClick={() => setShowCreateQuestionModal(editingQuestionsCategory)}
+                          onClick={() => {
+                            setCreateModalCategory(editingQuestionsCategory);
+                            setShowCreateQuestionModal(editingQuestionsCategory);
+                          }}
                           className="w-full py-3.5 bg-slate-900 text-white hover:bg-slate-800 rounded-2xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-md transition-all active:scale-95"
                         >
                           <Plus className="w-4 h-4" /> {t(lang, 'addNewQuestionBtn', { category: editingQuestionsCategory === 'barn' ? t(lang, 'kid') : t(lang, 'adult') })}
@@ -3750,16 +4191,151 @@ ${exampleJson}`;
                         <p className="text-[11px] text-slate-400 font-medium">{t(lang, 'currentPasswordLabel')} <span className="font-mono font-bold text-slate-600">{quizConfig.password || t(lang, 'noPasswordSet')}</span></p>
                       </div>
 
+                      {/* Geotag Unlock Distance */}
+                      <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200/70 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <MapPin className="w-4 h-4 text-indigo-600" />
+                            <h3 className="font-black text-xs text-slate-500 uppercase tracking-widest">{t(lang, 'geotagDistanceHeading')}</h3>
+                          </div>
+                          <span className="text-xs font-black px-2.5 py-1 rounded-full bg-indigo-100 text-indigo-700">
+                            {newGeotagDistance} {t(lang, 'metersUnit')}
+                          </span>
+                        </div>
+                        
+                        <p className="text-[11px] text-slate-500 font-medium leading-relaxed">
+                          {t(lang, 'geotagDistanceDesc')}
+                        </p>
+
+                        <div className="flex items-center gap-3">
+                          <input 
+                            type="range"
+                            min={5}
+                            max={100}
+                            step={1}
+                            disabled={!isAdmin}
+                            value={newGeotagDistance}
+                            onChange={(e) => {
+                              const val = Math.max(5, parseInt(e.target.value) || 5);
+                              setNewGeotagDistance(val);
+                            }}
+                            className="flex-1 accent-indigo-600 cursor-pointer disabled:opacity-50"
+                          />
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <input 
+                              type="number" 
+                              min={5}
+                              max={500}
+                              disabled={!isAdmin}
+                              className={`w-20 p-2.5 text-center border rounded-xl text-sm font-black outline-none transition-all ${
+                                isAdmin 
+                                  ? 'bg-white border-slate-200 focus:border-indigo-500 text-slate-800' 
+                                  : 'bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed'
+                              }`}
+                              value={newGeotagDistance}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value);
+                                if (!isNaN(val)) {
+                                  setNewGeotagDistance(val);
+                                } else {
+                                  setNewGeotagDistance(5);
+                                }
+                              }}
+                              onBlur={() => {
+                                if (newGeotagDistance < 5) {
+                                  setNewGeotagDistance(5);
+                                }
+                              }}
+                            />
+                            <span className="text-xs font-bold text-slate-400">m</span>
+                          </div>
+                          {isAdmin && (
+                            <button 
+                              onClick={() => {
+                                const safeVal = Math.max(5, newGeotagDistance || 20);
+                                setNewGeotagDistance(safeVal);
+                                setQuizConfig({ ...quizConfig, geotagUnlockDistance: safeVal });
+                                alert(t(lang, 'geotagDistanceUpdatedAlert'));
+                              }}
+                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black text-xs uppercase shadow-sm transition-all active:scale-95 shrink-0"
+                            >
+                              {t(lang, 'saveBtn')}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Quick preset buttons: 5m, 10m, 15m, 20m (Standard), 35m, 50m */}
+                        {isAdmin && (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {[5, 10, 15, 20, 35, 50].map((meters) => (
+                              <button
+                                key={meters}
+                                type="button"
+                                onClick={() => {
+                                  setNewGeotagDistance(meters);
+                                  setQuizConfig({ ...quizConfig, geotagUnlockDistance: meters });
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase transition-all ${
+                                  newGeotagDistance === meters
+                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                    : 'bg-slate-200/70 text-slate-600 hover:bg-slate-300/80'
+                                }`}
+                              >
+                                {meters} m {meters === 20 ? `(${t(lang, 'defaultPreset')})` : ''}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        <p className="text-[11px] text-slate-400 font-medium">
+                          {t(lang, 'currentGeotagDistanceLabel')} <span className="font-mono font-bold text-slate-600">{quizConfig.geotagUnlockDistance || 20} m</span>
+                        </p>
+                      </div>
+
+                      {/* Danger Zone */}
+                      {isAdmin && (
+                        <div className="pt-2 border-t border-slate-100 space-y-2">
+                          <button 
+                            onClick={() => setShowClearConfirm(true)}
+                            className="w-full py-3 bg-rose-50 text-rose-600 rounded-xl border border-rose-100 hover:bg-rose-100 transition-all font-black text-xs uppercase flex items-center justify-center gap-2 active:scale-95"
+                          >
+                            <Trash2 className="w-4 h-4" /> {t(lang, 'clearAllDataBtn')}
+                          </button>
+                        </div>
+                      )}
+
                       {/* Share */}
                       {isAdmin && (
                         <div className="space-y-3">
+                          {/* Direct Quiz Link Button (Top recommended) */}
+                          <button 
+                            onClick={shareDirectQuizUrl}
+                            className={`w-full flex items-center justify-center gap-2.5 p-3.5 rounded-2xl border transition-all font-black text-xs uppercase shadow-sm active:scale-95 ${
+                              copiedDirectUrlCode 
+                                ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300 ring-2 ring-emerald-200' 
+                                : 'bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white border-transparent shadow-indigo-200'
+                            }`}
+                          >
+                            {copiedDirectUrlCode ? (
+                              <>
+                                <Check className="w-4 h-4 text-emerald-600 stroke-[3]" />
+                                <span>{t(lang, 'codeCopiedToClipboard')}</span>
+                              </>
+                            ) : (
+                              <>
+                                <Share2 className="w-4 h-4" />
+                                <span>{t(lang, 'shareDirectLinkBtn')}</span>
+                              </>
+                            )}
+                          </button>
+
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                             <button 
                               onClick={shareConfig}
-                              className={`flex items-center justify-center gap-2.5 p-3.5 rounded-2xl border transition-all font-black text-xs uppercase shadow-2xs active:scale-95 ${
+                              className={`flex items-center justify-center gap-2.5 p-3 rounded-2xl border transition-all font-black text-[11px] uppercase shadow-2xs active:scale-95 ${
                                 copiedConfigCode 
-                                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300 ring-2 ring-emerald-200' 
-                                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
+                                ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300 ring-2 ring-emerald-200' 
+                                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
                               }`}
                             >
                               {copiedConfigCode ? (
@@ -3777,10 +4353,10 @@ ${exampleJson}`;
 
                             <button 
                               onClick={shareAppUrl}
-                              className={`flex items-center justify-center gap-2.5 p-3.5 rounded-2xl border transition-all font-black text-xs uppercase shadow-2xs active:scale-95 ${
+                              className={`flex items-center justify-center gap-2.5 p-3 rounded-2xl border transition-all font-black text-[11px] uppercase shadow-2xs active:scale-95 ${
                                 copiedAppUrlCode 
-                                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300 ring-2 ring-emerald-200' 
-                                  : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+                                ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-300 ring-2 ring-emerald-200' 
+                                : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
                               }`}
                             >
                               {copiedAppUrlCode ? (
@@ -3796,6 +4372,36 @@ ${exampleJson}`;
                               )}
                             </button>
                           </div>
+
+                          {/* Clipboard Notice Box for Direct Link */}
+                          <AnimatePresence>
+                            {copiedDirectUrlCode && (
+                              <motion.div 
+                                initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -8, scale: 0.98 }}
+                                className="p-4 bg-indigo-600 text-white rounded-2xl shadow-lg flex items-center justify-between gap-3"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 bg-white/20 rounded-xl flex items-center justify-center shrink-0">
+                                    <Check className="w-5 h-5 text-white stroke-[3]" />
+                                  </div>
+                                  <div>
+                                    <p className="font-black text-xs sm:text-sm">{t(lang, 'directLinkCopiedTitle')}</p>
+                                    <p className="text-[11px] text-indigo-100 font-medium">
+                                      {t(lang, 'directLinkCopiedDesc')} {directUrlLength ? `(${directUrlLength} tecken)` : ''}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => setCopiedDirectUrlCode(false)}
+                                  className="text-indigo-100 hover:text-white p-1 font-black text-sm shrink-0"
+                                >
+                                  ✕
+                                </button>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
 
                           {/* Clipboard Notice Box for Quiz Code */}
                           <AnimatePresence>
@@ -3874,19 +4480,8 @@ ${exampleJson}`;
                         </div>
                       </div>
 
-                      {/* Danger Zone */}
-                      {isAdmin && (
-                        <div className="pt-4 border-t border-slate-100 space-y-2">
-                          <button 
-                            onClick={() => setShowClearConfirm(true)}
-                            className="w-full py-3 bg-rose-50 text-rose-600 rounded-xl border border-rose-100 hover:bg-rose-100 transition-all font-black text-xs uppercase flex items-center justify-center gap-2 active:scale-95"
-                          >
-                            <Trash2 className="w-4 h-4" /> {t(lang, 'clearAllDataBtn')}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                      </div>
+                    )}
 
                   {/* Settings Help Modal */}
                   <AnimatePresence>
@@ -4337,12 +4932,12 @@ ${exampleJson}`;
                             {/* Question Type Switcher */}
                             <div className="space-y-3">
                               <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] ml-1">{t(lang, 'questionTypeLabel')}</label>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                 <button 
                                   type="button"
                                   disabled={!isAdmin}
                                   onClick={() => {
-                                    if (q.type === 'points') {
+                                    if ((q.type || 'options') !== 'options') {
                                       updateQuestion(editingQuestionsCategory, q.id, { 
                                         type: 'options',
                                         options: q.options && q.options.length > 0 ? q.options : [t(lang, 'defaultOption1'), t(lang, 'defaultOptionX'), t(lang, 'defaultOption2')],
@@ -4350,7 +4945,7 @@ ${exampleJson}`;
                                       });
                                     }
                                   }}
-                                  className={`p-3.5 sm:p-4 rounded-2xl border-2 flex items-center justify-center gap-2.5 font-black text-xs uppercase transition-all ${
+                                  className={`p-3.5 sm:p-4 rounded-2xl border-2 flex items-center justify-center gap-2 font-black text-xs uppercase transition-all ${
                                     (q.type || 'options') === 'options'
                                       ? 'bg-indigo-600 text-white border-indigo-600 shadow-md ring-2 ring-indigo-200'
                                       : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -4364,14 +4959,36 @@ ${exampleJson}`;
                                   type="button"
                                   disabled={!isAdmin}
                                   onClick={() => {
-                                    if ((q.type || 'options') !== 'points') {
+                                    if (q.type !== 'text') {
+                                      updateQuestion(editingQuestionsCategory, q.id, { 
+                                        type: 'text',
+                                        correctTextAnswer: q.correctTextAnswer || (q.options && q.options.length > 0 ? q.options[0] : 'Rätt svar'),
+                                        acceptedTextAnswers: q.acceptedTextAnswers || []
+                                      });
+                                    }
+                                  }}
+                                  className={`p-3.5 sm:p-4 rounded-2xl border-2 flex items-center justify-center gap-2 font-black text-xs uppercase transition-all ${
+                                    q.type === 'text'
+                                      ? 'bg-sky-600 text-white border-sky-600 shadow-md ring-2 ring-sky-200'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <span className="text-sm">🔤</span>
+                                  <span>{t(lang, 'textQuestionType')}</span>
+                                </button>
+
+                                <button 
+                                  type="button"
+                                  disabled={!isAdmin}
+                                  onClick={() => {
+                                    if (q.type !== 'points') {
                                       updateQuestion(editingQuestionsCategory, q.id, { 
                                         type: 'points',
                                         maxPoints: q.maxPoints || 10
                                       });
                                     }
                                   }}
-                                  className={`p-3.5 sm:p-4 rounded-2xl border-2 flex items-center justify-center gap-2.5 font-black text-xs uppercase transition-all ${
+                                  className={`p-3.5 sm:p-4 rounded-2xl border-2 flex items-center justify-center gap-2 font-black text-xs uppercase transition-all ${
                                     q.type === 'points'
                                       ? 'bg-amber-500 text-white border-amber-500 shadow-md ring-2 ring-amber-200'
                                       : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -4383,7 +5000,7 @@ ${exampleJson}`;
                               </div>
                             </div>
 
-                            {/* Options or Points Configuration */}
+                            {/* Options, Text, or Points Configuration */}
                             {q.type === 'points' ? (
                               <div className="space-y-5 p-6 sm:p-8 bg-amber-50/80 border-2 border-amber-200 rounded-3xl">
                                 <div className="flex items-center gap-3">
@@ -4457,6 +5074,223 @@ ${exampleJson}`;
                                           toggleQuestionTargetGroup(q.id, 'vuxen', e.target.checked);
                                         }}
                                         className="w-4 h-4 rounded accent-amber-600 cursor-pointer"
+                                      />
+                                      <span className="text-base leading-none">🧑</span>
+                                      <span>{t(lang, 'adult')}</span>
+                                    </label>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : q.type === 'text' ? (
+                              <div className="space-y-5 p-6 sm:p-8 bg-sky-50/80 border-2 border-sky-200 rounded-3xl">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 bg-sky-600 text-white rounded-2xl flex items-center justify-center font-black text-lg shadow-sm">
+                                      🔤
+                                    </div>
+                                    <div>
+                                      <h4 className="font-black text-sm sm:text-base text-sky-950 uppercase tracking-wide">{t(lang, 'textAnswerCorrectHeader')}</h4>
+                                      <p className="text-xs text-sky-800 font-medium">{t(lang, 'soundexOfflineNote')}</p>
+                                    </div>
+                                  </div>
+                                  <span className="bg-sky-200 text-sky-900 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider">
+                                    {t(lang, 'linguisticEngineTag')}
+                                  </span>
+                                </div>
+
+                                {/* Primary Correct Answer */}
+                                <div className="space-y-2 pt-2">
+                                  <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider">
+                                    {t(lang, 'primaryCorrectAnswerLabel')}
+                                  </label>
+                                  <div className="relative">
+                                    <input 
+                                      type="text"
+                                      disabled={!isAdmin}
+                                      value={rawQ.correctTextAnswer || ''}
+                                      placeholder={t(lang, 'correctAnswerPlaceholder')}
+                                      onChange={(e) => {
+                                        updateQuestion(editingQuestionsCategory, q.id, {
+                                          correctTextAnswer: e.target.value
+                                        });
+                                      }}
+                                      className={`w-full p-4 bg-white border-2 border-sky-300 focus:border-sky-500 rounded-2xl text-base font-bold text-slate-800 shadow-inner outline-none transition-all ${
+                                        !isAdmin ? 'bg-slate-100 cursor-not-allowed' : ''
+                                      }`}
+                                    />
+                                    {rawQ.correctTextAnswer && (
+                                      <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-sky-700 bg-sky-100 px-2 py-1 rounded-lg text-[10px] font-black">
+                                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{t(lang, 'soundexCodeLabel')}:</span>
+                                        <code className="font-mono">{soundex(rawQ.correctTextAnswer)}</code>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Accepted Alternatives */}
+                                <div className="space-y-3 pt-2">
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider">
+                                      {t(lang, 'acceptedAlternativesLabel')} ({t(lang, 'optional')})
+                                    </label>
+                                    {isAdmin && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const curr = rawQ.acceptedTextAnswers || [];
+                                          updateQuestion(editingQuestionsCategory, q.id, {
+                                            acceptedTextAnswers: [...curr, '']
+                                          });
+                                        }}
+                                        className="text-[10px] font-black uppercase text-sky-700 hover:text-sky-900 bg-sky-200/60 hover:bg-sky-200 px-2.5 py-1 rounded-lg transition-all flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        <span>{t(lang, 'addAlternativeBtn')}</span>
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  {(rawQ.acceptedTextAnswers && rawQ.acceptedTextAnswers.length > 0) ? (
+                                    <div className="space-y-2">
+                                      {rawQ.acceptedTextAnswers.map((alt, altIdx) => (
+                                        <div key={altIdx} className="flex items-center gap-2">
+                                          <input
+                                            type="text"
+                                            disabled={!isAdmin}
+                                            value={alt}
+                                            placeholder={t(lang, 'alternativeNumPlaceholder', { num: (altIdx + 1).toString() })}
+                                            onChange={(e) => {
+                                              const newAlts = [...(rawQ.acceptedTextAnswers || [])];
+                                              newAlts[altIdx] = e.target.value;
+                                              updateQuestion(editingQuestionsCategory, q.id, {
+                                                acceptedTextAnswers: newAlts
+                                              });
+                                            }}
+                                            className="flex-1 p-3 bg-white border border-sky-200 rounded-xl text-sm font-semibold text-slate-800 outline-none focus:border-sky-500"
+                                          />
+                                          {isAdmin && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                const newAlts = (rawQ.acceptedTextAnswers || []).filter((_, i) => i !== altIdx);
+                                                updateQuestion(editingQuestionsCategory, q.id, {
+                                                  acceptedTextAnswers: newAlts
+                                                });
+                                              }}
+                                              className="p-2.5 text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
+                                              title={t(lang, 'deleteQuestionBtn')}
+                                            >
+                                              <Trash2 className="w-4 h-4" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-xs text-slate-400 italic">
+                                      {t(lang, 'noAlternativesHint')}
+                                    </p>
+                                  )}
+                                </div>
+
+                                {/* Real-time Interactive Test Validator */}
+                                <div className="p-4 bg-gradient-to-br from-indigo-50/90 to-sky-50/90 border-2 border-indigo-200/80 rounded-2xl space-y-3">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-base">🧪</span>
+                                      <span className="text-xs font-black text-indigo-950 uppercase tracking-wider">{t(lang, 'testSpellingLabel')}</span>
+                                    </div>
+                                    <span className="text-[10px] text-indigo-600 font-bold bg-indigo-100/70 px-2 py-0.5 rounded-md">{t(lang, 'liveBadge')}</span>
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <input 
+                                      type="text"
+                                      value={editorTestWord}
+                                      onChange={(e) => setEditorTestWord(e.target.value)}
+                                      placeholder={t(lang, 'testSpellingPlaceholder')}
+                                      className="w-full p-3 bg-white border border-indigo-300 focus:border-indigo-500 rounded-xl text-sm font-bold text-slate-800 outline-none shadow-2xs"
+                                    />
+
+                                    {editorTestWord.trim() && (() => {
+                                      const testRes = evaluateTextAnswer(
+                                        editorTestWord,
+                                        rawQ.correctTextAnswer || '',
+                                        rawQ.acceptedTextAnswers || [],
+                                        editingQuestionLang
+                                      );
+                                      const flagMap: Record<string, string> = { sv: '🇸🇪', en: '🇬🇧', de: '🇩🇪', fr: '🇫🇷', es: '🇪🇸' };
+                                      return (
+                                        <div className={`p-3 rounded-xl border flex flex-wrap items-center justify-between gap-2 text-xs font-bold ${
+                                          testRes.match 
+                                            ? 'bg-emerald-50 border-emerald-300 text-emerald-900' 
+                                            : 'bg-rose-50 border-rose-200 text-rose-800'
+                                        }`}>
+                                          <div className="flex items-center gap-2">
+                                            <span>{testRes.match ? '✅' : '❌'}</span>
+                                            <span>{testRes.match ? t(lang, 'testMatchSuccess') : t(lang, 'testMatchFail')}</span>
+                                            <span className="opacity-80 text-[11px]">({Math.round(testRes.confidence * 100)} % {t(lang, 'confidenceLabel').toLowerCase()})</span>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                            <span className="bg-white/80 px-2 py-0.5 rounded text-[11px] font-extrabold">
+                                              {flagMap[testRes.detected_language] || '🌐'} {testRes.detected_language.toUpperCase()}
+                                            </span>
+                                            {testRes.method && testRes.method !== 'none' && (
+                                              <span className="bg-white/80 px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-mono">
+                                                {t(lang, `method_${testRes.method}` as any) || testRes.method}
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+                                  </div>
+                                </div>
+
+                                {/* Target Groups for Text Questions */}
+                                <div className="pt-3 border-t border-sky-200/80 space-y-3">
+                                  <div>
+                                    <h5 className="font-black text-xs sm:text-sm text-sky-950 uppercase tracking-wider">{t(lang, 'targetGroupsLabel')}</h5>
+                                    <p className="text-[11px] text-sky-800 font-medium">{t(lang, 'targetGroupsDesc')}</p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                                    <label 
+                                      className={`flex items-center gap-3 px-5 py-3 rounded-2xl border-2 font-black text-xs uppercase cursor-pointer transition-all active:scale-95 ${
+                                        isBarnChecked
+                                          ? 'bg-sky-600 text-white border-sky-600 shadow-md ring-2 ring-sky-200'
+                                          : 'bg-white text-slate-600 border-sky-200 hover:bg-sky-100/50'
+                                      } ${!isAdmin ? 'opacity-80 cursor-not-allowed' : ''}`}
+                                    >
+                                      <input 
+                                        type="checkbox"
+                                        checked={isBarnChecked}
+                                        disabled={!isAdmin}
+                                        onChange={(e) => {
+                                          if (!isAdmin) return;
+                                          toggleQuestionTargetGroup(q.id, 'barn', e.target.checked);
+                                        }}
+                                        className="w-4 h-4 rounded accent-sky-600 cursor-pointer"
+                                      />
+                                      <span className="text-base leading-none">👶</span>
+                                      <span>{t(lang, 'kid')}</span>
+                                    </label>
+
+                                    <label 
+                                      className={`flex items-center gap-3 px-5 py-3 rounded-2xl border-2 font-black text-xs uppercase cursor-pointer transition-all active:scale-95 ${
+                                        isVuxenChecked
+                                          ? 'bg-sky-600 text-white border-sky-600 shadow-md ring-2 ring-sky-200'
+                                          : 'bg-white text-slate-600 border-sky-200 hover:bg-sky-100/50'
+                                      } ${!isAdmin ? 'opacity-80 cursor-not-allowed' : ''}`}
+                                    >
+                                      <input 
+                                        type="checkbox"
+                                        checked={isVuxenChecked}
+                                        disabled={!isAdmin}
+                                        onChange={(e) => {
+                                          if (!isAdmin) return;
+                                          toggleQuestionTargetGroup(q.id, 'vuxen', e.target.checked);
+                                        }}
+                                        className="w-4 h-4 rounded accent-sky-600 cursor-pointer"
                                       />
                                       <span className="text-base leading-none">🧑</span>
                                       <span>{t(lang, 'adult')}</span>
@@ -4547,6 +5381,57 @@ ${exampleJson}`;
                                       <span>{t(lang, 'addOption')}</span>
                                     </button>
                                   )}
+                                </div>
+
+                                {/* Target Groups for Options Questions */}
+                                <div className="pt-4 border-t border-slate-200/80 space-y-3">
+                                  <div>
+                                    <h5 className="font-black text-xs sm:text-sm text-slate-800 uppercase tracking-wider">{t(lang, 'targetGroupsLabel')}</h5>
+                                    <p className="text-[11px] text-slate-500 font-medium">{t(lang, 'targetGroupsDesc')}</p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                                    <label 
+                                      className={`flex items-center gap-3 px-5 py-3 rounded-2xl border-2 font-black text-xs uppercase cursor-pointer transition-all active:scale-95 ${
+                                        isBarnChecked
+                                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-md ring-2 ring-indigo-200'
+                                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                                      } ${!isAdmin ? 'opacity-80 cursor-not-allowed' : ''}`}
+                                    >
+                                      <input 
+                                        type="checkbox"
+                                        checked={isBarnChecked}
+                                        disabled={!isAdmin}
+                                        onChange={(e) => {
+                                          if (!isAdmin) return;
+                                          toggleQuestionTargetGroup(q.id, 'barn', e.target.checked);
+                                        }}
+                                        className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+                                      />
+                                      <span className="text-base leading-none">👶</span>
+                                      <span>{t(lang, 'kid')}</span>
+                                    </label>
+
+                                    <label 
+                                      className={`flex items-center gap-3 px-5 py-3 rounded-2xl border-2 font-black text-xs uppercase cursor-pointer transition-all active:scale-95 ${
+                                        isVuxenChecked
+                                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-md ring-2 ring-indigo-200'
+                                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                                      } ${!isAdmin ? 'opacity-80 cursor-not-allowed' : ''}`}
+                                    >
+                                      <input 
+                                        type="checkbox"
+                                        checked={isVuxenChecked}
+                                        disabled={!isAdmin}
+                                        onChange={(e) => {
+                                          if (!isAdmin) return;
+                                          toggleQuestionTargetGroup(q.id, 'vuxen', e.target.checked);
+                                        }}
+                                        className="w-4 h-4 rounded accent-indigo-600 cursor-pointer"
+                                      />
+                                      <span className="text-base leading-none">🧑</span>
+                                      <span>{t(lang, 'adult')}</span>
+                                    </label>
+                                  </div>
                                 </div>
                               </div>
                             )}
@@ -4678,52 +5563,128 @@ ${exampleJson}`;
                 </div>
 
                 <div className="space-y-5">
-                  <div className="flex flex-col gap-2">
-                    <p className="text-xs font-black text-slate-400 uppercase tracking-widest">{t(lang, 'importTargetLabel')}</p>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={() => setImportTarget('båda')}
-                        className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
-                          importTarget === 'båda' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
-                        }`}
-                      >
-                        {t(lang, 'bothCategoryCombo')}
-                      </button>
-                      <button 
-                        onClick={() => setImportTarget('barn')}
-                        className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
-                          importTarget === 'barn' ? 'bg-amber-400 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
-                        }`}
-                      >
-                        {t(lang, 'kids')} 🧒
-                      </button>
-                      <button 
-                        onClick={() => setImportTarget('vuxen')}
-                        className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
-                          importTarget === 'vuxen' ? 'bg-pink-400 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
-                        }`}
-                      >
-                        {t(lang, 'adult')} 🧔
-                      </button>
+                  {/* Tab Switcher for Import Modal */}
+                  <div className="flex gap-2 bg-slate-100 p-1 rounded-[1.25rem] border border-slate-200/60">
+                    <button 
+                      onClick={() => setConfigTab('library')}
+                      className={`flex-1 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                        configTab === 'library' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+                      }`}
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      {t(lang, 'libraryTab')}
+                    </button>
+                    <button 
+                      onClick={() => setConfigTab('questions')}
+                      className={`flex-1 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                        configTab === 'questions' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+                      }`}
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      {t(lang, 'importQuizTitle')}
+                    </button>
+                  </div>
+
+                  {configTab === 'library' ? (
+                    <div className="space-y-4">
+                      <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-100 flex items-start gap-3">
+                        <Sparkles className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
+                        <p className="text-[11px] text-indigo-700 font-medium leading-relaxed">
+                          {t(lang, 'libraryDesc')}
+                        </p>
+                      </div>
+
+                      <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-1 custom-scrollbar">
+                        {isLibraryLoading ? (
+                          <div className="py-12 text-center text-slate-400 font-bold flex flex-col items-center gap-3">
+                            <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                            <p className="text-xs uppercase tracking-widest">{t(lang, 'loadingLibrary')}</p>
+                          </div>
+                        ) : libraryError ? (
+                          <div className="p-6 text-center text-rose-500 font-bold bg-rose-50 rounded-2xl border border-rose-100 space-y-3">
+                            <p className="text-sm">{t(lang, 'libraryError')}</p>
+                            <button 
+                              onClick={fetchQuizLibrary}
+                              className="px-4 py-1.5 bg-rose-100 hover:bg-rose-200 rounded-full text-[10px] uppercase font-black transition-all"
+                            >
+                              {t(lang, 'retryBtn')}
+                            </button>
+                          </div>
+                        ) : quizLibrary.length === 0 ? (
+                          <div className="py-10 text-center text-slate-400 font-bold bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                            <p className="text-sm">{t(lang, 'libraryEmpty')}</p>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-3">
+                            {quizLibrary.map(item => (
+                              <div key={item.id} className="p-4 bg-white border border-slate-200 rounded-2xl hover:border-indigo-300 transition-all group flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div>
+                                  <h4 className="font-black text-slate-800 text-sm group-hover:text-indigo-600 transition-colors">{item.title}</h4>
+                                  <p className="text-[10px] text-slate-500 font-medium line-clamp-1">{item.description}</p>
+                                </div>
+                                <button 
+                                  onClick={() => loadLibraryQuiz(item.filename)}
+                                  className="py-2 px-4 bg-indigo-50 hover:bg-indigo-600 hover:text-white text-indigo-700 rounded-xl font-black text-[10px] uppercase transition-all shrink-0 flex items-center justify-center gap-2"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  <span>{t(lang, 'loadQuizBtn')}</span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="flex flex-col gap-2">
+                        <p className="text-xs font-black text-slate-400 uppercase tracking-widest">{t(lang, 'importTargetLabel')}</p>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => setImportTarget('båda')}
+                            className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
+                              importTarget === 'båda' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                            }`}
+                          >
+                            {t(lang, 'bothCategoryCombo')}
+                          </button>
+                          <button 
+                            onClick={() => setImportTarget('barn')}
+                            className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
+                              importTarget === 'barn' ? 'bg-amber-400 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                            }`}
+                          >
+                            {t(lang, 'kids')} 🧒
+                          </button>
+                          <button 
+                            onClick={() => setImportTarget('vuxen')}
+                            className={`flex-1 py-3 rounded-xl font-black text-xs uppercase transition-all ${
+                              importTarget === 'vuxen' ? 'bg-pink-400 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                            }`}
+                          >
+                            {t(lang, 'adult')} 🧔
+                          </button>
+                        </div>
+                      </div>
 
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{t(lang, 'pasteCodeOrTextLabel')}</p>
-                    <textarea 
-                      className="w-full h-44 p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 text-xs font-mono outline-none focus:border-indigo-500 custom-scrollbar"
-                      placeholder={t(lang, 'pasteCodePlaceholder')}
-                      value={configJsonInput}
-                      onChange={(e) => setConfigJsonInput(e.target.value)}
-                    />
-                  </div>
+                      <div className="space-y-2">
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{t(lang, 'pasteCodeOrTextLabel')}</p>
+                        <textarea 
+                          className="w-full h-44 p-4 bg-slate-50 rounded-2xl border-2 border-slate-100 text-xs font-mono outline-none focus:border-indigo-500 custom-scrollbar"
+                          placeholder={t(lang, 'pasteCodePlaceholder')}
+                          value={configJsonInput}
+                          onChange={(e) => setConfigJsonInput(e.target.value)}
+                        />
+                      </div>
 
-                  <button 
-                    onClick={handleImportConfig}
-                    className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-sm uppercase shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Upload className="w-4 h-4" /> {t(lang, 'loadQuizBtn')}
-                  </button>
+                      <button 
+                        onClick={handleImportConfig}
+                        className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-sm uppercase shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Upload className="w-4 h-4" /> {t(lang, 'loadQuizBtn')}
+                      </button>
+                    </>
+                  )}
                 </div>
               </motion.div>
             </motion.div>
@@ -4770,7 +5731,7 @@ ${exampleJson}`;
                     <div className="text-amber-400 font-black text-lg">➔</div>
                     <div>
                       <span className="block text-[9px] text-amber-700 font-black uppercase">Krävs</span>
-                      <span className="text-sm font-black text-emerald-700">Inom 35 m</span>
+                      <span className="text-sm font-black text-emerald-700">Inom {quizConfig.geotagUnlockDistance || 20} m</span>
                     </div>
                   </div>
                 )}
@@ -4818,13 +5779,13 @@ ${exampleJson}`;
                 </div>
                 
                 <div className="space-y-2">
-                  <h3 className="text-2xl font-black text-slate-800 leading-tight">Är du helt säker?</h3>
+                  <h3 className="text-2xl font-black text-slate-800 leading-tight">{t(lang, 'areYouSure')}</h3>
                   <p className="text-slate-500 font-medium">
-                    {questionToDelete && "Denna fråga kommer att raderas permanent."}
-                    {participantToDelete && `Vill du verkligen ta bort deltagaren "${participantToDelete.name}"? Alla svar från personen raderas också.`}
-                    {showBulkDeleteConfirm && `Du håller på att radera ${selectedQuestionIds.length} markerade frågor permanent.`}
-                    {showResetConfirm && "Alla svar kommer att nollställas. Detta går inte att ångra."}
-                    {showClearConfirm && "Alla deltagare och deras svar kommer att raderas permanent."}
+                    {questionToDelete && t(lang, 'deleteQuestionConfirm')}
+                    {participantToDelete && t(lang, 'deleteParticipantConfirm').replace('{name}', participantToDelete.name)}
+                    {showBulkDeleteConfirm && t(lang, 'deleteBulkQuestionsConfirm').replace('{count}', selectedQuestionIds.length.toString())}
+                    {showResetConfirm && t(lang, 'resetQuizConfirm')}
+                    {showClearConfirm && t(lang, 'clearAllDataConfirm')}
                   </p>
                 </div>
 
@@ -4850,7 +5811,7 @@ ${exampleJson}`;
                         : 'bg-rose-500 shadow-rose-200 hover:bg-rose-600'
                     }`}
                   >
-                    {showResetConfirm ? 'Radera våra svar 🧨' : 'Ja, radera! 🧨'}
+                    {showResetConfirm ? t(lang, 'confirmResetBtn') : t(lang, 'yesDelete')}
                   </button>
                   <button 
                     onClick={() => {
@@ -4866,7 +5827,7 @@ ${exampleJson}`;
                         : 'text-slate-400 hover:text-slate-600'
                     }`}
                   >
-                    {showResetConfirm ? 'Avbryt' : 'Nej, ångra mig'}
+                    {showResetConfirm ? t(lang, 'cancelResetBtn') : t(lang, 'noCancel')}
                   </button>
                 </div>
               </motion.div>
@@ -4891,7 +5852,7 @@ ${exampleJson}`;
                     </div>
                     <div className="text-left">
                       <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">{t(lang, 'selectQuestionTypeModalTitle')}</h3>
-                      <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">{t(lang, 'categorySubheading', { category: showCreateQuestionModal === 'barn' ? t(lang, 'kid') : t(lang, 'adult') })}</p>
+                      <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">{t(lang, 'targetGroupsLabel')}</p>
                     </div>
                   </div>
                   <button 
@@ -4903,10 +5864,60 @@ ${exampleJson}`;
                   </button>
                 </div>
 
+                {/* Target Category Selector (Barn / Vuxen / Båda) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider">
+                      {t(lang, 'categoryLabel')}
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase">
+                      {createModalCategory === 'båda' ? t(lang, 'bothCategory') : createModalCategory === 'barn' ? t(lang, 'kid') : t(lang, 'adult')}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCreateModalCategory('barn')}
+                      className={`py-3 px-2 sm:px-3 rounded-2xl border-2 font-black text-xs uppercase flex items-center justify-center gap-1.5 transition-all ${
+                        createModalCategory === 'barn'
+                          ? 'bg-sky-600 text-white border-sky-600 shadow-md shadow-sky-100 ring-2 ring-sky-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span className="text-base leading-none">👶</span>
+                      <span>{t(lang, 'kid')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCreateModalCategory('vuxen')}
+                      className={`py-3 px-2 sm:px-3 rounded-2xl border-2 font-black text-xs uppercase flex items-center justify-center gap-1.5 transition-all ${
+                        createModalCategory === 'vuxen'
+                          ? 'bg-amber-600 text-white border-amber-600 shadow-md shadow-amber-100 ring-2 ring-amber-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span className="text-base leading-none">🧑</span>
+                      <span>{t(lang, 'adult')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCreateModalCategory('båda')}
+                      className={`py-3 px-2 sm:px-3 rounded-2xl border-2 font-black text-xs uppercase flex items-center justify-center gap-1.5 transition-all ${
+                        createModalCategory === 'båda'
+                          ? 'bg-purple-600 text-white border-purple-600 shadow-md shadow-purple-100 ring-2 ring-purple-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span className="text-base leading-none">👶🧑</span>
+                      <span>{t(lang, 'bothCategory')}</span>
+                    </button>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 gap-3.5">
                   <button
                     type="button"
-                    onClick={() => addNewQuestion(showCreateQuestionModal, 'options')}
+                    onClick={() => addNewQuestion(createModalCategory, 'options')}
                     className="p-5 rounded-2xl border-2 border-slate-200 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/50 text-left transition-all group flex items-start gap-4 shadow-2xs active:scale-[0.98]"
                   >
                     <div className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-md shadow-indigo-200 group-hover:scale-105 transition-all">
@@ -4925,7 +5936,26 @@ ${exampleJson}`;
 
                   <button
                     type="button"
-                    onClick={() => addNewQuestion(showCreateQuestionModal, 'points')}
+                    onClick={() => addNewQuestion(createModalCategory, 'text')}
+                    className="p-5 rounded-2xl border-2 border-slate-200 hover:border-sky-500 bg-slate-50 hover:bg-sky-50/50 text-left transition-all group flex items-start gap-4 shadow-2xs active:scale-[0.98]"
+                  >
+                    <div className="w-12 h-12 bg-sky-600 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-md shadow-sky-200 group-hover:scale-105 transition-all font-black text-xl">
+                      🔤
+                    </div>
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-black text-sm text-slate-800 group-hover:text-sky-950 uppercase tracking-wide">{t(lang, 'textQuestionType')}</h4>
+                        <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-sky-100 text-sky-800">{t(lang, 'linguisticEngineTag')}</span>
+                      </div>
+                      <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                        {t(lang, 'textTypeDesc')}
+                      </p>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => addNewQuestion(createModalCategory, 'points')}
                     className="p-5 rounded-2xl border-2 border-slate-200 hover:border-amber-500 bg-slate-50 hover:bg-amber-50/50 text-left transition-all group flex items-start gap-4 shadow-2xs active:scale-[0.98]"
                   >
                     <div className="w-12 h-12 bg-amber-500 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-md shadow-amber-200 group-hover:scale-105 transition-all font-black text-xl">
@@ -4957,8 +5987,33 @@ ${exampleJson}`;
           )}
         </AnimatePresence>
 
-        {/* Global Toast Notice for Copied Clipboard Code / App URL */}
+        {/* Global Toast Notice for Copied Clipboard Code / App URL / Direct URL */}
         <AnimatePresence>
+          {copiedDirectUrlCode && (
+            <motion.div
+              initial={{ opacity: 0, y: -40, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -40, scale: 0.9 }}
+              className="fixed top-5 left-1/2 -translate-x-1/2 z-[10000] max-w-md w-[90%] bg-indigo-600 text-white p-4 rounded-2xl shadow-2xl border border-indigo-400 flex items-center gap-3.5"
+            >
+              <div className="w-9 h-9 bg-white/20 rounded-xl flex items-center justify-center shrink-0">
+                <Check className="w-5 h-5 text-white stroke-[3]" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-black text-xs sm:text-sm text-white leading-tight">{t(lang, 'directLinkCopiedTitle')}</p>
+                <p className="text-[11px] text-indigo-100 font-medium truncate">
+                  {t(lang, 'directLinkCopiedDesc')} {directUrlLength ? `(${directUrlLength} tecken)` : ''}
+                </p>
+              </div>
+              <button 
+                onClick={() => setCopiedDirectUrlCode(false)}
+                className="text-white/80 hover:text-white p-1 text-sm font-bold shrink-0"
+              >
+                ✕
+              </button>
+            </motion.div>
+          )}
+
           {copiedConfigCode && (
             <motion.div
               initial={{ opacity: 0, y: -40, scale: 0.9 }}

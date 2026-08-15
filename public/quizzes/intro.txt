@@ -1,0 +1,20 @@
+[
+  {
+    "text": "Vad heter Sveriges huvudstad?",
+    "options": ["Malmö", "Göteborg", "Stockholm"],
+    "correctAnswers": [2],
+    "originalLanguage": "sv"
+  },
+  {
+    "text": "Hur många ben har en spindel?",
+    "options": ["6", "8", "10"],
+    "correctAnswers": [1],
+    "originalLanguage": "sv"
+  },
+  {
+    "text": "Vilken färg har en mogen banan vanligtvis?",
+    "options": ["Röd", "Blå", "Gul"],
+    "correctAnswers": [2],
+    "originalLanguage": "sv"
+  }
+]

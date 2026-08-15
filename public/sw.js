@@ -1,11 +1,17 @@
-const CACHE_NAME = 'family-quiz-pwa-v2';
+const CACHE_NAME = 'family-quiz-pwa-preview-v1';
 const APP_SCOPE = self.registration.scope;
 
 const STATIC_ASSETS = [
   new URL('./', APP_SCOPE).toString(),
   new URL('./index.html', APP_SCOPE).toString(),
   new URL('./manifest.webmanifest', APP_SCOPE).toString(),
-  new URL('./icon.svg', APP_SCOPE).toString()
+  new URL('./icon.svg', APP_SCOPE).toString(),
+  new URL('./icon.png', APP_SCOPE).toString(),
+  new URL('./pwa-192.png', APP_SCOPE).toString(),
+  new URL('./pwa-512.png', APP_SCOPE).toString(),
+  new URL('./apple-touch-icon.png', APP_SCOPE).toString(),
+  new URL('./favicon.png', APP_SCOPE).toString(),
+  new URL('./icon.jpg', APP_SCOPE).toString()
 ];
 
 // Install Event - cache core shell

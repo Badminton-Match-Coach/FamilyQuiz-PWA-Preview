@@ -6,7 +6,7 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     // Explicit project-site base for GitHub Pages.
-    base: '/FamilyQuiz-PWA/',
+    base: '/FamilyQuiz-PWA-Preview/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

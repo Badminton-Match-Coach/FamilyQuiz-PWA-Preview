@@ -1,0 +1,14 @@
+[
+  {
+    "text": "What is the capital of Sweden?",
+    "options": ["Malmö", "Gothenburg", "Stockholm"],
+    "correctAnswers": [2],
+    "originalLanguage": "en"
+  },
+  {
+    "text": "How many legs does a spider have?",
+    "options": ["6", "8", "10"],
+    "correctAnswers": [1],
+    "originalLanguage": "en"
+  }
+]

@@ -3,6 +3,7 @@ import { QuizConfig } from '../types';
 export const defaultQuiz: QuizConfig = {
   title: "Family Summer Quiz",
   password: "123",
+  geotagUnlockDistance: 20,
   barnQuestions: [
     {
       id: "b1",
@@ -23,6 +24,16 @@ export const defaultQuiz: QuizConfig = {
       text: "How many fingers does a human have on one hand?",
       options: ["4", "5", "6", "10"],
       correctAnswers: [1],
+      originalLanguage: "en"
+    },
+    {
+      id: "b4",
+      type: "text",
+      text: "What animal with a long trunk is the largest land mammal?",
+      options: [],
+      correctAnswers: [],
+      correctTextAnswer: "Elephant",
+      acceptedTextAnswers: ["Elefant", "An elephant"],
       originalLanguage: "en"
     }
   ],
@@ -46,6 +57,16 @@ export const defaultQuiz: QuizConfig = {
       text: "What is the capital of Canada?",
       options: ["Toronto", "Vancouver", "Ottawa", "Montreal"],
       correctAnswers: [2],
+      originalLanguage: "en"
+    },
+    {
+      id: "v4",
+      type: "text",
+      text: "What is the capital city of Sweden?",
+      options: [],
+      correctAnswers: [],
+      correctTextAnswer: "Stockholm",
+      acceptedTextAnswers: ["Sthlm", "Gamla Stan"],
       originalLanguage: "en"
     }
   ]

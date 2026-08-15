@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz Katalog</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; line-height: 1.6; color: #333; }
+        h1 { color: #4f46e5; }
+        .quiz-item { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        .quiz-title { font-weight: bold; font-size: 1.2em; }
+        .quiz-desc { color: #666; font-size: 0.9em; margin: 5px 0; }
+        .load-link { color: #4f46e5; font-weight: bold; text-decoration: none; display: inline-block; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Standard Quizzar</h1>
+    <p>Välj ett quiz nedan för att ladda det i appen.</p>
+    <div id="quiz-list">Laddar...</div>
+
+    <script>
+        fetch('manifest.json')
+            .then(res => res.json())
+            .then(data => {
+                const list = document.getElementById('quiz-list');
+                list.innerHTML = '';
+                data.forEach(quiz => {
+                    const div = document.createElement('div');
+                    div.className = 'quiz-item';
+                    div.innerHTML = `
+                        <div class="quiz-title">${quiz.title}</div>
+                        <div class="quiz-desc">${quiz.description}</div>
+                        <a href="../?quizFile=${quiz.filename}" class="load-link">Ladda Quiz &rarr;</a>
+                    `;
+                    list.appendChild(div);
+                });
+            })
+            .catch(err => {
+                document.getElementById('quiz-list').innerHTML = 'Kunde inte ladda katalogen.';
+            });
+    </script>
+</body>
+</html>

@@ -173,3 +173,80 @@ Keep the exact same "id" for each question. Preserve the original meaning and or
   const data = JSON.parse(response.text || "{}");
   return data;
 }
+
+/**
+ * Validates a user's text answer against a target word using the Gemini Linguistic Validation Engine.
+ */
+export async function validateTextAnswerWithGemini(params: {
+  userInput: string;
+  targetWord: string;
+  acceptedAlternatives?: string[];
+  language?: string;
+  apiKey?: string;
+}): Promise<{
+  match: boolean;
+  confidence: number;
+  detected_language: 'sv' | 'en' | 'de' | 'fr' | 'es';
+}> {
+  const apiKey = params.apiKey || getStoredApiKey();
+  if (!apiKey) {
+    throw new Error("MISSING_API_KEY");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  const { userInput, targetWord, acceptedAlternatives = [] } = params;
+
+  const prompt = `You are a linguistic validation engine for a multi-lingual Progressive Web App (PWA). Your job is to determine if a user's input matches a specific target word or concept, even if the user has made severe spelling or grammatical errors typical of dyslexia.
+
+Support these five European languages: Swedish, English, German, French, and Spanish.
+
+Apply the following evaluation rules to the user's input:
+1. Ignore case sensitivity completely (e.g., "aba" should match "Abba").
+2. Ignore missing, extra, or swapped double consonants (e.g., "aba" or "abbba" matches "Abba"; "alene" matches "alleine").
+3. Ignore missing or incorrect diacritics/accents (e.g., "ee" or "e" for "é"/"è" in French, missing "umlauts" ä/ö/ü in German/Swedish, missing "ñ" or accents in Spanish).
+4. Forgive character transpositions/swaps (e.g., "baab" instead of "barn", "teh" instead of "the").
+5. Forgive phonetic substitutions common in the specific language (e.g., "sk", "stj", "sj" in Swedish; "ph" vs "f" in English/German/French; "v" vs "b" in Spanish; "c" vs "z"/"s" in Spanish/French).
+
+Allow a general fuzziness/error margin of up to 30-35% of the target word's length.
+
+User Input: "${userInput}"
+Target Word: "${targetWord}"
+${acceptedAlternatives.length > 0 ? `Accepted Alternatives: ${JSON.stringify(acceptedAlternatives)}` : ''}
+
+CRITICAL: You must always respond in a strict, minified JSON format. Do not include any conversational text, markdown formatting (like \`\`\`json), or explanations. 
+
+Output structure:
+{
+  "match": boolean,
+  "confidence": float (0.0 to 1.0),
+  "detected_language": "sv" | "en" | "de" | "fr" | "es"
+}`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3.6-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          match: { type: Type.BOOLEAN },
+          confidence: { type: Type.NUMBER },
+          detected_language: { 
+            type: Type.STRING,
+            enum: ["sv", "en", "de", "fr", "es"]
+          }
+        },
+        required: ["match", "confidence", "detected_language"]
+      }
+    }
+  });
+
+  const parsed = JSON.parse(response.text || "{}");
+  return {
+    match: Boolean(parsed.match),
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+    detected_language: parsed.detected_language || 'sv'
+  };
+}
+
