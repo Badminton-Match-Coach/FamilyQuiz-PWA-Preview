@@ -1,0 +1,57 @@
+{
+  "title": "Introduktionstips (Svenska)",
+  "description": "Exempelquiz med frågor för både barn och vuxna.",
+  "timeLimit": 0,
+  "barnQuestions": [
+    {
+      "id": "intro-barn-1",
+      "text": "Vilken färg har en mogen banan?",
+      "options": ["Röd", "Gul", "Blå"],
+      "correctAnswer": 1,
+      "explanation": "Mogna bananer är gula.",
+      "category": "Natur"
+    },
+    {
+      "id": "intro-barn-2",
+      "text": "Vilket djur jamar?",
+      "options": ["Hund", "Katt", "Ko"],
+      "correctAnswer": 1,
+      "explanation": "Katter säger mjau och jamar.",
+      "category": "Djur"
+    },
+    {
+      "id": "intro-barn-3",
+      "text": "Hur många ben har en spindel?",
+      "options": ["6", "8", "10"],
+      "correctAnswer": 1,
+      "explanation": "Spindlar har åtta ben, medan insekter har sex ben.",
+      "category": "Natur"
+    }
+  ],
+  "vuxenQuestions": [
+    {
+      "id": "intro-vuxen-1",
+      "text": "Vilket år föll Berlinmuren?",
+      "options": ["1987", "1989", "1991"],
+      "correctAnswer": 1,
+      "explanation": "Berlinmuren öppnades den 9 november 1989.",
+      "category": "Historia"
+    },
+    {
+      "id": "intro-vuxen-2",
+      "text": "Vilket är det kemiska tecknet för guld?",
+      "options": ["Ag", "Au", "Fe"],
+      "correctAnswer": 1,
+      "explanation": "Au kommer från det latinska ordet Aurum.",
+      "category": "Vetenskap"
+    },
+    {
+      "id": "intro-vuxen-3",
+      "text": "Vilken planet i vårt solsystem är störst?",
+      "options": ["Mars", "Jupiter", "Saturnus"],
+      "correctAnswer": 1,
+      "explanation": "Jupiter är solsystemets överlägset största planet.",
+      "category": "Astronomi"
+    }
+  ]
+}

@@ -8,6 +8,14 @@ export default defineConfig(() => {
     // Explicit project-site base for GitHub Pages.
     base: '/FamilyQuiz-PWA-Preview/',
     plugins: [react(), tailwindcss()],
+    build: {
+      minify: 'terser',
+      terserOptions: {
+        compress: {passes: 2, toplevel: true},
+        mangle: {toplevel: true},
+        format: {comments: false},
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

@@ -1,6 +1,6 @@
 {
-  "name": "FamilyQuiz PWA Preview",
-  "short_name": "Quiz Preview",
+  "name": "FamilyQuiz PWA",
+  "short_name": "FamilyQuiz PWA",
   "description": "Offline-ready family walk quiz with multi-language support, GPS station maps and live grading.",
   "id": ".",
   "start_url": ".",

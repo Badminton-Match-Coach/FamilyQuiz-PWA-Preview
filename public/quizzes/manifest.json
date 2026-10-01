@@ -1,14 +1,20 @@
 [
   {
     "id": "intro-sv",
-    "title": "Välkomstquiz (SV)",
-    "filename": "intro.txt",
-    "description": "Ett kort quiz för att komma igång med appen."
+    "title": "Introduktionstips (Svenska)",
+    "description": "Klassisk tipspromenad med 3 barnfrågor och 3 vuxenfrågor.",
+    "filename": "intro_sv.json",
+    "barnCount": 3,
+    "vuxenCount": 3,
+    "language": "sv"
   },
   {
     "id": "intro-en",
-    "title": "Welcome Quiz (EN)",
-    "filename": "intro_en.txt",
-    "description": "A short quiz to get started with the app."
+    "title": "Introductory Quiz (English)",
+    "description": "Standard quiz trail with 3 kids questions and 3 adult questions.",
+    "filename": "intro_en.json",
+    "barnCount": 3,
+    "vuxenCount": 3,
+    "language": "en"
   }
 ]

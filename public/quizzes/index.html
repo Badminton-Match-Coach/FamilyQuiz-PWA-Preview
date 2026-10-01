@@ -1,43 +1,554 @@
 <!DOCTYPE html>
 <html lang="sv">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quiz Katalog</title>
-    <style>
-        body { font-family: sans-serif; padding: 20px; line-height: 1.6; color: #333; }
-        h1 { color: #4f46e5; }
-        .quiz-item { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
-        .quiz-title { font-weight: bold; font-size: 1.2em; }
-        .quiz-desc { color: #666; font-size: 0.9em; margin: 5px 0; }
-        .load-link { color: #4f46e5; font-weight: bold; text-decoration: none; display: inline-block; margin-top: 10px; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quizkatalog & Administrationsportal - Family Quiz</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-    <h1>Standard Quizzar</h1>
-    <p>Välj ett quiz nedan för att ladda det i appen.</p>
-    <div id="quiz-list">Laddar...</div>
+<body class="bg-slate-50 text-slate-800 p-4 sm:p-8 min-h-screen">
+  <div class="max-w-4xl mx-auto space-y-6">
 
-    <script>
-        fetch('manifest.json')
-            .then(res => res.json())
-            .then(data => {
-                const list = document.getElementById('quiz-list');
-                list.innerHTML = '';
-                data.forEach(quiz => {
-                    const div = document.createElement('div');
-                    div.className = 'quiz-item';
-                    div.innerHTML = `
-                        <div class="quiz-title">${quiz.title}</div>
-                        <div class="quiz-desc">${quiz.description}</div>
-                        <a href="../?quizFile=${quiz.filename}" class="load-link">Ladda Quiz &rarr;</a>
-                    `;
-                    list.appendChild(div);
-                });
-            })
-            .catch(err => {
-                document.getElementById('quiz-list').innerHTML = 'Kunde inte ladda katalogen.';
-            });
-    </script>
+    <!-- Header -->
+    <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-slate-200 flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+      <div class="space-y-1">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center text-xl shadow-sm">
+            📚
+          </div>
+          <div>
+            <h1 class="text-2xl font-black text-slate-800 tracking-tight">Quizkatalog & Hantering</h1>
+            <p class="text-xs text-slate-500 font-medium">Family Quiz - Central lagringsplats för tipspromenader</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 flex-wrap">
+        <button onclick="copyCatalogAppUrl()" id="btn-copy-app-link" class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-sm flex items-center gap-2">
+          <span>📋</span> Kopiera app-kataloglänk
+        </button>
+        <a href="../" class="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 rounded-xl font-bold text-xs uppercase tracking-wider transition-all flex items-center gap-2">
+          <span>⬅</span> Tillbaka till appen
+        </a>
+      </div>
+    </div>
+
+    <!-- Instructions / Admin Guide -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-2">
+        <div class="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+          <span class="w-6 h-6 rounded-full bg-indigo-50 flex items-center justify-center text-xs font-black">1</span>
+          <h3>Ladda upp JSON</h3>
+        </div>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          Placera dina quizfiler i samma mapp som denna fil (t.ex. <code class="bg-slate-100 px-1 py-0.5 rounded text-indigo-700 font-mono text-[11px]">mitt_quiz.json</code>).
+        </p>
+      </div>
+
+      <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-2">
+        <div class="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+          <span class="w-6 h-6 rounded-full bg-indigo-50 flex items-center justify-center text-xs font-black">2</span>
+          <h3>Uppdatera listan</h3>
+        </div>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          Lägg till filnamnet i <code class="bg-slate-100 px-1 py-0.5 rounded text-indigo-700 font-mono text-[11px]">manifest.json</code> eller använd generatorn nedan.
+        </p>
+      </div>
+
+      <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-2">
+        <div class="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+          <span class="w-6 h-6 rounded-full bg-indigo-50 flex items-center justify-center text-xs font-black">3</span>
+          <h3>Länka i appen</h3>
+        </div>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          Ange webbadressen i appens bibliotek så syns alla tipspromenader direkt för deltagarna!
+        </p>
+      </div>
+    </div>
+
+    <!-- URL Parameter Guide & Direct Link Builder -->
+    <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-slate-200 space-y-5">
+      <div class="space-y-1">
+        <div class="flex items-center gap-2 text-indigo-600 font-black text-sm uppercase tracking-wider">
+          <span>🔗</span>
+          <h2>URL-Parametrar för direktlänkning (Katalog + Quizfilnamn)</h2>
+        </div>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          Appen kan ta emot URL-parametrar för att direkt ladda ner och starta ett quiz från en extern eller lokal katalog utan manuella steg.
+        </p>
+      </div>
+
+      <!-- Parameter descriptions -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
+          <span class="font-bold text-slate-800 flex items-center gap-1.5">
+            <span>🌐</span> Katalog-parameter
+          </span>
+          <p class="font-mono text-indigo-600 text-[11px]">catalog, katalog, cat, catalogUrl</p>
+          <p class="text-slate-500 text-[11px] leading-tight">Webbadress till mappen eller manifest.json där quizfilerna ligger.</p>
+        </div>
+        <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
+          <span class="font-bold text-slate-800 flex items-center gap-1.5">
+            <span>📄</span> Quizfil-parameter
+          </span>
+          <p class="font-mono text-purple-600 text-[11px]">quizFile, file, fil, quizfil, quiz</p>
+          <p class="text-slate-500 text-[11px] leading-tight">Filnamnet på quizet (t.ex. <code class="font-mono">sommarquiz.json</code>).</p>
+        </div>
+        <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
+          <span class="font-bold text-slate-800 flex items-center gap-1.5">
+            <span>🔒</span> Låst läge (valfritt)
+          </span>
+          <p class="font-mono text-amber-600 text-[11px]">lock=1, mode=quiz</p>
+          <p class="text-slate-500 text-[11px] leading-tight">Låser appen i rent deltagarläge och döljer redigeringsknappar.</p>
+        </div>
+      </div>
+
+      <!-- Interactive Generator Box -->
+      <div class="p-4 sm:p-5 bg-gradient-to-br from-indigo-50/70 to-purple-50/40 rounded-2xl border border-indigo-100 space-y-3">
+        <h3 class="text-xs font-black text-indigo-900 uppercase tracking-wider flex items-center gap-1.5">
+          <span>⚡</span> Direktlänksgenerator & Testare
+        </h3>
+        
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div class="space-y-1">
+            <label class="font-bold text-slate-700 text-[11px]">Katalog-URL:</label>
+            <input type="text" id="tool-catalog-url" class="w-full text-xs font-mono p-2.5 rounded-xl border border-slate-300 bg-white" placeholder="https://minsajt.se/quizzes/" oninput="updateGeneratedUrl()">
+          </div>
+          <div class="space-y-1">
+            <label class="font-bold text-slate-700 text-[11px]">Quizfilnamn:</label>
+            <div class="flex gap-2">
+              <input type="text" id="tool-quiz-file" class="w-full text-xs font-mono p-2.5 rounded-xl border border-slate-300 bg-white" placeholder="intro_sv.json" value="intro_sv.json" oninput="updateGeneratedUrl()">
+              <select id="tool-file-select" class="text-xs font-mono p-2.5 rounded-xl border border-slate-300 bg-white" onchange="onSelectToolFile()">
+                <option value="intro_sv.json">intro_sv.json</option>
+                <option value="intro_en.json">intro_en.json</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="tool-lock-check" class="w-4 h-4 text-indigo-600 rounded" onchange="updateGeneratedUrl()">
+          <label for="tool-lock-check" class="text-xs font-bold text-slate-700 cursor-pointer select-none">
+            Lås i deltagarläge (<code class="font-mono text-indigo-700">&amp;lock=1</code>)
+          </label>
+        </div>
+
+        <div class="space-y-1.5 pt-1">
+          <span class="text-[11px] font-bold text-slate-600">Genererad URL för att öppna quizet:</span>
+          <div id="tool-output-url" class="p-3 bg-slate-900 text-emerald-400 font-mono text-[11px] rounded-xl break-all select-all shadow-inner leading-relaxed">
+            Läser in adress...
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 flex-wrap pt-1">
+          <button onclick="copyGeneratedToolUrl()" id="btn-copy-tool-url" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-xs transition-all flex items-center gap-1.5">
+            <span>📋</span> Kopiera direktlänk
+          </button>
+          <a id="btn-test-tool-url" href="../" class="px-4 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5">
+            <span>🚀</span> Öppna och testa quizet
+          </a>
+        </div>
+      </div>
+
+      <!-- Quick Examples Accordion/List -->
+      <div class="space-y-2 pt-1 border-t border-slate-100 text-xs">
+        <span class="font-bold text-slate-700 text-[11px]">Färdiga exempel att kopiera:</span>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+          <div class="p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 font-mono text-slate-600 break-all select-all">
+            <span class="text-slate-400 block text-[10px] font-sans font-bold">Standard URL:</span>
+            ?catalog=https://example.com/quizzes/&amp;quizFile=sommarquiz.json
+          </div>
+          <div class="p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 font-mono text-slate-600 break-all select-all">
+            <span class="text-slate-400 block text-[10px] font-sans font-bold">Svenska parametrar:</span>
+            ?katalog=https://example.com/quizzes/&amp;fil=sommarquiz.json
+          </div>
+          <div class="p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 font-mono text-slate-600 break-all select-all">
+            <span class="text-slate-400 block text-[10px] font-sans font-bold">Relativ katalog:</span>
+            ?catalog=quizzes/&amp;quizFile=intro_sv.json
+          </div>
+          <div class="p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 font-mono text-slate-600 break-all select-all">
+            <span class="text-slate-400 block text-[10px] font-sans font-bold">Låst deltagarläge:</span>
+            ?catalog=quizzes/&amp;quizFile=intro_sv.json&amp;lock=1
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Active Quizzes Section -->
+    <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-slate-200 space-y-5">
+      <div class="flex items-center justify-between gap-4 flex-wrap pb-4 border-b border-slate-100">
+        <div>
+          <h2 class="text-lg font-black text-slate-800 flex items-center gap-2">
+            <span>🎯</span> Tillgängliga Quiz i katalogen
+          </h2>
+          <p class="text-xs text-slate-500 font-medium" id="quiz-count">Läser in frågefiler...</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="loadQuizzes()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5">
+            <span>🔄</span> Uppdatera
+          </button>
+        </div>
+      </div>
+
+      <!-- Quiz cards container -->
+      <div id="quiz-list" class="grid grid-cols-1 gap-3">
+        <div class="p-8 text-center text-slate-400 font-bold bg-slate-50 rounded-2xl border border-slate-200">
+          Söker av quizkatalogen...
+        </div>
+      </div>
+    </div>
+
+    <!-- Administrator Tools Collapsible -->
+    <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+      <div class="p-6 bg-slate-900 text-white flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 class="text-base font-black tracking-wide flex items-center gap-2">
+            <span>🛠️</span> Administrationsverktyg & Inställningar
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">Hjälpmedel för att hantera externa servrar och generera filer</p>
+        </div>
+      </div>
+
+      <div class="p-6 sm:p-8 space-y-6">
+        <!-- Tool 1: Manifest Generator -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-black text-slate-800 flex items-center gap-2">
+              <span>📄</span> Skapa / Uppdatera manifest.json
+            </h3>
+            <span class="text-[11px] text-slate-500">Skapa indexering för quizfiler</span>
+          </div>
+          <p class="text-xs text-slate-500">
+            Ange filnamnen på de .json-filer du har lagt i mappen (separerade med komma eller radbrytning):
+          </p>
+          <textarea id="files-input" rows="2" class="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-indigo-600" placeholder="intro_sv.json, intro_en.json, sommarquiz.json">intro_sv.json, intro_en.json</textarea>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button onclick="generateManifest()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs transition-all shadow-xs">
+              Generera manifest-kod ⚡
+            </button>
+            <button onclick="downloadManifestFile()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition-all">
+              Ladda ner som manifest.json 💾
+            </button>
+          </div>
+          <div id="manifest-output-box" class="hidden space-y-2 pt-2">
+            <div class="flex items-center justify-between text-xs text-slate-500">
+              <span>Förhandsgranskning av <code class="font-mono text-indigo-600">manifest.json</code>:</span>
+              <button onclick="copyManifestCode()" id="btn-copy-manifest" class="text-indigo-600 font-bold hover:underline">
+                Kopiera kod
+              </button>
+            </div>
+            <pre id="manifest-output" class="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl overflow-x-auto"></pre>
+          </div>
+        </div>
+
+        <hr class="border-slate-100">
+
+        <!-- Tool 2: CORS / .htaccess helper for Apache -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-black text-slate-800 flex items-center gap-2">
+              <span>🌐</span> CORS & .htaccess för externa servrar (Apache / One.com / Loopia)
+            </h3>
+            <span class="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded font-bold">Valfritt men rekommenderat</span>
+          </div>
+          <p class="text-xs text-slate-500 leading-relaxed">
+            Om du kör katalogen på en extern Apache-webbserver kan du skapa en fil som heter <code class="bg-slate-100 px-1 py-0.5 rounded font-mono text-indigo-700 font-bold">.htaccess</code> i denna mapp så att webbläsare tillåts läsa filerna direkt utan CORS-varningar:
+          </p>
+          <div class="relative">
+            <pre class="p-4 bg-slate-900 text-slate-100 font-mono text-xs rounded-xl overflow-x-auto leading-relaxed"><code id="htaccess-code">&lt;IfModule mod_headers.c&gt;
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type"
+&lt;/IfModule&gt;</code></pre>
+            <button onclick="copyHtaccessCode()" id="btn-copy-htaccess" class="absolute top-3 right-3 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-bold transition-all border border-slate-700">
+              Kopiera .htaccess
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Fallback Embedded Manifest for Instant Discovery -->
+  <script type="application/json" id="quiz-manifest">
+  [
+    {
+      "id": "intro-sv",
+      "title": "Introduktionstips (Svenska)",
+      "description": "Klassisk tipspromenad med 3 barnfrågor och 3 vuxenfrågor.",
+      "filename": "intro_sv.json",
+      "barnCount": 3,
+      "vuxenCount": 3,
+      "language": "sv"
+    },
+    {
+      "id": "intro-en",
+      "title": "Introductory Quiz (English)",
+      "description": "Standard quiz trail with 3 kids questions and 3 adult questions.",
+      "filename": "intro_en.json",
+      "barnCount": 3,
+      "vuxenCount": 3,
+      "language": "en"
+    }
+  ]
+  </script>
+
+  <script>
+    // Known default fallback files
+    const DEFAULT_KNOWN_FILES = ['intro_sv.json', 'intro_en.json'];
+
+    async function loadQuizzes() {
+      const container = document.getElementById('quiz-list');
+      const countLabel = document.getElementById('quiz-count');
+      
+      container.innerHTML = '<div class="p-6 text-center text-slate-400 font-bold bg-slate-50 rounded-2xl border border-slate-200">Söker av quizkatalogen...</div>';
+
+      let items = [];
+
+      // 1. Try to fetch manifest.json
+      try {
+        const res = await fetch('manifest.json?_t=' + Date.now());
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            items = data;
+          } else if (data && Array.isArray(data.quizzes)) {
+            items = data.quizzes;
+          }
+        }
+      } catch (e) {
+        console.warn('manifest.json not accessible, trying embedded script:', e);
+      }
+
+      // 2. Fallback to embedded script tag
+      if (items.length === 0) {
+        const embeddedScript = document.getElementById('quiz-manifest');
+        if (embeddedScript && embeddedScript.textContent) {
+          try {
+            items = JSON.parse(embeddedScript.textContent);
+          } catch(e) {}
+        }
+      }
+
+      // 3. Fallback to default known files
+      if (items.length === 0) {
+        items = DEFAULT_KNOWN_FILES.map(f => ({
+          id: f.replace('.json', ''),
+          title: f.replace('.json', '').replace(/[_-]/g, ' '),
+          filename: f
+        }));
+      }
+
+      countLabel.textContent = `${items.length} quizfil${items.length === 1 ? '' : 'er'} i katalogen`;
+      container.innerHTML = '';
+
+      // Populate direct link generator options
+      const catalogUrlField = document.getElementById('tool-catalog-url');
+      if (catalogUrlField && !catalogUrlField.value) {
+        catalogUrlField.value = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
+      }
+      const toolFileSelect = document.getElementById('tool-file-select');
+      if (toolFileSelect && items.length > 0) {
+        toolFileSelect.innerHTML = items.map(it => {
+          const fn = typeof it === 'string' ? it : (it.filename || it.file || '');
+          return `<option value="${fn}">${fn}</option>`;
+        }).join('');
+      }
+      updateGeneratedUrl();
+
+      if (items.length === 0) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-400 bg-slate-50 rounded-2xl border border-slate-200 font-bold">Inga quizfiler hittades. Lägg till filer och uppdatera manifest.json.</div>';
+        return;
+      }
+
+      for (const item of items) {
+        const filename = typeof item === 'string' ? item : (item.filename || item.file || '');
+        const title = (typeof item === 'object' && item.title) ? item.title : filename;
+        const description = (typeof item === 'object' && item.description) ? item.description : '';
+
+        const card = document.createElement('div');
+        card.className = 'p-5 bg-slate-50 hover:bg-white border border-slate-200/80 hover:border-indigo-300 rounded-2xl shadow-2xs hover:shadow-xs transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4';
+        
+        let questionDetails = '<span class="text-xs text-slate-400 font-medium">Läser detaljer...</span>';
+        const directStartUrl = `../?catalog=${encodeURIComponent(window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1))}&quizFile=${encodeURIComponent(filename)}`;
+
+        card.innerHTML = `
+          <div class="space-y-1.5 flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <h3 class="font-black text-slate-800 text-base">${title}</h3>
+              <span class="bg-white text-indigo-700 font-mono text-[11px] px-2 py-0.5 rounded border border-slate-200">${filename}</span>
+            </div>
+            ${description ? `<p class="text-xs text-slate-500 font-medium">${description}</p>` : ''}
+            <div class="flex items-center gap-2 pt-1 flex-wrap details-placeholder">
+              ${questionDetails}
+            </div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0 flex-wrap">
+            <a href="${filename}" download class="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-700 rounded-xl font-bold text-xs border border-slate-200 transition-all">
+              Visa JSON 📄
+            </a>
+            <button onclick="copyDirectQuizLink('${filename}')" class="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl font-bold text-xs transition-all">
+              Kopiera länk 🔗
+            </button>
+            <a href="${directStartUrl}" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black text-xs uppercase tracking-wider transition-all shadow-2xs">
+              Starta 🚀
+            </a>
+          </div>
+        `;
+        container.appendChild(card);
+
+        // Fetch question stats asynchronously
+        fetch(filename + '?_t=' + Date.now())
+          .then(res => res.json())
+          .then(quizData => {
+            const barn = Array.isArray(quizData.barnQuestions) ? quizData.barnQuestions.length : 0;
+            const vuxen = Array.isArray(quizData.vuxenQuestions) ? quizData.vuxenQuestions.length : 0;
+            const target = card.querySelector('.details-placeholder');
+            if (target) {
+              target.innerHTML = `
+                <span class="bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-md text-[11px] font-bold">🧒 ${barn} barnfrågor</span>
+                <span class="bg-pink-50 text-pink-800 border border-pink-200 px-2 py-0.5 rounded-md text-[11px] font-bold">🧔 ${vuxen} vuxenfrågor</span>
+                ${quizData.timeLimit ? `<span class="bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md text-[11px] font-bold">⏱️ ${quizData.timeLimit}s</span>` : ''}
+              `;
+            }
+          })
+          .catch(() => {
+            const target = card.querySelector('.details-placeholder');
+            if (target) {
+              target.innerHTML = '<span class="text-[11px] text-slate-400 font-medium">Standardfrågor</span>';
+            }
+          });
+      }
+    }
+
+    function copyCatalogAppUrl() {
+      const catalogUrl = window.location.href.split('?')[0].split('#')[0];
+      const appUrl = new URL('../', window.location.href);
+      appUrl.searchParams.set('catalog', catalogUrl);
+      
+      navigator.clipboard.writeText(appUrl.toString());
+      
+      const btn = document.getElementById('btn-copy-app-link');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<span>✓</span> Länk kopierad!';
+      btn.className = 'px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold text-xs uppercase tracking-wider shadow-sm transition-all flex items-center gap-2';
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.className = 'px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs uppercase tracking-wider shadow-sm transition-all flex items-center gap-2';
+      }, 2500);
+    }
+
+    function copyDirectQuizLink(filename) {
+      const catalogBase = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
+      const appUrl = new URL('../', window.location.href);
+      appUrl.searchParams.set('catalog', catalogBase);
+      appUrl.searchParams.set('quizFile', filename);
+      
+      navigator.clipboard.writeText(appUrl.toString());
+      alert(`Direktlänk för "${filename}" har kopierats till urklipp!\n\n${appUrl.toString()}`);
+    }
+
+    function updateGeneratedUrl() {
+      const catalogInput = document.getElementById('tool-catalog-url');
+      const fileInput = document.getElementById('tool-quiz-file');
+      const lockCheck = document.getElementById('tool-lock-check');
+      const outputBox = document.getElementById('tool-output-url');
+      const testBtn = document.getElementById('btn-test-tool-url');
+
+      let catalogVal = catalogInput ? catalogInput.value.trim() : '';
+      if (!catalogVal) {
+        catalogVal = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
+      }
+
+      let fileVal = fileInput ? fileInput.value.trim() : 'intro_sv.json';
+      const isLocked = lockCheck ? lockCheck.checked : false;
+
+      const appUrl = new URL('../', window.location.href);
+      appUrl.searchParams.set('catalog', catalogVal);
+      appUrl.searchParams.set('quizFile', fileVal);
+      if (isLocked) {
+        appUrl.searchParams.set('lock', '1');
+      }
+
+      const finalUrl = appUrl.toString();
+      if (outputBox) outputBox.textContent = finalUrl;
+      if (testBtn) testBtn.href = finalUrl;
+    }
+
+    function onSelectToolFile() {
+      const sel = document.getElementById('tool-file-select');
+      const input = document.getElementById('tool-quiz-file');
+      if (sel && input) {
+        input.value = sel.value;
+        updateGeneratedUrl();
+      }
+    }
+
+    function copyGeneratedToolUrl() {
+      const outputBox = document.getElementById('tool-output-url');
+      const text = outputBox ? outputBox.textContent.trim() : '';
+      if (!text) return;
+      navigator.clipboard.writeText(text);
+      const btn = document.getElementById('btn-copy-tool-url');
+      if (btn) {
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<span>✓</span> Kopierad!';
+        btn.className = 'px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs shadow-xs transition-all flex items-center gap-1.5';
+        setTimeout(() => {
+          btn.innerHTML = orig;
+          btn.className = 'px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-xs transition-all flex items-center gap-1.5';
+        }, 2000);
+      }
+    }
+
+    function generateManifest() {
+      const input = document.getElementById('files-input').value;
+      const filenames = input.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      
+      const manifestArray = filenames.map(f => {
+        const id = f.replace('.json', '');
+        const cleanTitle = id.replace(/[_-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        return {
+          id: id,
+          title: cleanTitle,
+          description: `Tipspromenad (${cleanTitle})`,
+          filename: f
+        };
+      });
+
+      const formatted = JSON.stringify(manifestArray, null, 2);
+      document.getElementById('manifest-output').textContent = formatted;
+      document.getElementById('manifest-output-box').classList.remove('hidden');
+    }
+
+    function copyManifestCode() {
+      const text = document.getElementById('manifest-output').textContent;
+      navigator.clipboard.writeText(text);
+      const btn = document.getElementById('btn-copy-manifest');
+      btn.textContent = 'Kopierad! ✓';
+      setTimeout(() => { btn.textContent = 'Kopiera kod'; }, 2000);
+    }
+
+    function downloadManifestFile() {
+      generateManifest();
+      const text = document.getElementById('manifest-output').textContent;
+      const blob = new Blob([text], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'manifest.json';
+      a.click();
+    }
+
+    function copyHtaccessCode() {
+      const text = document.getElementById('htaccess-code').textContent;
+      navigator.clipboard.writeText(text);
+      const btn = document.getElementById('btn-copy-htaccess');
+      btn.textContent = 'Kopierad! ✓';
+      setTimeout(() => { btn.textContent = 'Kopiera .htaccess'; }, 2000);
+    }
+
+    loadQuizzes();
+  </script>
 </body>
 </html>

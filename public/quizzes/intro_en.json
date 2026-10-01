@@ -1,0 +1,57 @@
+{
+  "title": "Introductory Quiz (English)",
+  "description": "Sample quiz with questions for both kids and adults.",
+  "timeLimit": 0,
+  "barnQuestions": [
+    {
+      "id": "intro-en-barn-1",
+      "text": "What color is a ripe banana?",
+      "options": ["Red", "Yellow", "Blue"],
+      "correctAnswer": 1,
+      "explanation": "Ripe bananas are yellow.",
+      "category": "Nature"
+    },
+    {
+      "id": "intro-en-barn-2",
+      "text": "Which animal meows?",
+      "options": ["Dog", "Cat", "Cow"],
+      "correctAnswer": 1,
+      "explanation": "Cats meow.",
+      "category": "Animals"
+    },
+    {
+      "id": "intro-en-barn-3",
+      "text": "How many legs does a spider have?",
+      "options": ["6", "8", "10"],
+      "correctAnswer": 1,
+      "explanation": "Spiders have 8 legs.",
+      "category": "Nature"
+    }
+  ],
+  "vuxenQuestions": [
+    {
+      "id": "intro-en-vuxen-1",
+      "text": "In which year did the Berlin Wall fall?",
+      "options": ["1987", "1989", "1991"],
+      "correctAnswer": 1,
+      "explanation": "The Berlin Wall fell in November 1989.",
+      "category": "History"
+    },
+    {
+      "id": "intro-en-vuxen-2",
+      "text": "What is the chemical symbol for Gold?",
+      "options": ["Ag", "Au", "Fe"],
+      "correctAnswer": 1,
+      "explanation": "Au comes from the Latin word Aurum.",
+      "category": "Science"
+    },
+    {
+      "id": "intro-en-vuxen-3",
+      "text": "Which planet is the largest in our solar system?",
+      "options": ["Mars", "Jupiter", "Saturn"],
+      "correctAnswer": 1,
+      "explanation": "Jupiter is the largest planet in our solar system.",
+      "category": "Astronomy"
+    }
+  ]
+}

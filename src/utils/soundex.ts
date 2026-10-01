@@ -290,7 +290,8 @@ export function evaluateTextAnswer(
   userAnswer: string,
   correctAnswer: string,
   acceptedAnswers: string[] = [],
-  preferredLang: string = 'sv'
+  preferredLang: string = 'sv',
+  strictness: 'strict' | 'normal' | 'lenient' = 'normal'
 ): LinguisticValidationResult {
   if (!userAnswer || !userAnswer.trim()) {
     return {
@@ -352,19 +353,18 @@ export function evaluateTextAnswer(
     const targetSx = soundex(rawTarget);
 
     const targetLen = Math.max(strippedTarget.length, 1);
-    // Allow up to 25% error margin for "reasonable" tolerance (was 35% for heavy dyslexia support)
-    const allowedErrorMargin = Math.max(1, Math.floor(targetLen * 0.25));
+    const maxLen = Math.max(strippedUser.length, strippedTarget.length);
+    const distDirect = damerauLevenshteinDistance(strippedUser, strippedTarget);
 
     // 1. EXACT or DIRECT MATCH (Rule 1 & Rule 3)
-    if (
-      cleanUser === cleanTarget ||
-      strippedUser === strippedTarget ||
-      (cleanUser.length >= 3 && cleanTarget.length >= 3 && (cleanUser.includes(cleanTarget) || cleanTarget.includes(cleanUser)))
-    ) {
+    const isExactMatch = cleanUser === cleanTarget || strippedUser === strippedTarget;
+    const isSubstringMatch = strictness === 'lenient' && cleanUser.length >= 4 && cleanTarget.length >= 4 && (cleanUser.includes(cleanTarget) || cleanTarget.includes(cleanUser));
+
+    if (isExactMatch || isSubstringMatch) {
       return {
         match: true,
         isCorrect: true,
-        confidence: 1.0,
+        confidence: isExactMatch ? 1.0 : 0.88,
         detected_language: detectedLang,
         method: 'exact',
         damerauDistance: 0,
@@ -377,53 +377,73 @@ export function evaluateTextAnswer(
 
     // 2. DOUBLE CONSONANT COLLAPSE MATCH (Rule 2: "aba" vs "Abba", "alene" vs "alleine")
     if (collapsedUser === collapsedTarget && collapsedTarget.length >= 2) {
-      return {
-        match: true,
-        isCorrect: true,
-        confidence: 0.96,
-        detected_language: detectedLang,
-        method: 'phonetic',
-        damerauDistance: damerauLevenshteinDistance(strippedUser, strippedTarget),
-        distance: damerauLevenshteinDistance(strippedUser, strippedTarget),
-        soundexCodeUser: userSx,
-        soundexCodeTarget: targetSx,
-        similarityPercentage: 96,
-      };
+      const allowedDistForDouble = strictness === 'strict' ? 1 : strictness === 'normal' ? 2 : 99;
+      if (distDirect <= allowedDistForDouble) {
+        return {
+          match: true,
+          isCorrect: true,
+          confidence: 0.96,
+          detected_language: detectedLang,
+          method: 'phonetic',
+          damerauDistance: distDirect,
+          distance: distDirect,
+          soundexCodeUser: userSx,
+          soundexCodeTarget: targetSx,
+          similarityPercentage: 96,
+        };
+      }
     }
 
     // 3. PHONETIC SUBSTITUTIONS MATCH (Rule 5: Swedish skj/stj/sj, English ph/f, Spanish v/b, etc.)
     if (phoneticUser === phoneticTarget && phoneticTarget.length >= 2) {
-      return {
-        match: true,
-        isCorrect: true,
-        confidence: 0.94,
-        detected_language: detectedLang,
-        method: 'phonetic',
-        damerauDistance: damerauLevenshteinDistance(strippedUser, strippedTarget),
-        distance: damerauLevenshteinDistance(strippedUser, strippedTarget),
-        soundexCodeUser: userSx,
-        soundexCodeTarget: targetSx,
-        similarityPercentage: 94,
-      };
+      const allowedDistForPhonetic = strictness === 'strict' ? 1 : strictness === 'normal' ? 2 : 99;
+      if (distDirect <= allowedDistForPhonetic) {
+        return {
+          match: true,
+          isCorrect: true,
+          confidence: 0.94,
+          detected_language: detectedLang,
+          method: 'phonetic',
+          damerauDistance: distDirect,
+          distance: distDirect,
+          soundexCodeUser: userSx,
+          soundexCodeTarget: targetSx,
+          similarityPercentage: 94,
+        };
+      }
     }
 
-    // 4. DAMERAU-LEVENSHTEIN TRANSPOSITION & FUZZY MATCH (Rule 4 & 30-35% fuzziness)
-    const distDirect = damerauLevenshteinDistance(strippedUser, strippedTarget);
+    // 4. DAMERAU-LEVENSHTEIN TRANSPOSITION & FUZZY MATCH
     const distCollapsed = damerauLevenshteinDistance(collapsedUser, collapsedTarget);
     const distPhonetic = damerauLevenshteinDistance(phoneticUser, phoneticTarget);
     const minDistance = Math.min(distDirect, distCollapsed, distPhonetic);
 
-    const maxLen = Math.max(strippedUser.length, strippedTarget.length);
     const similarity = maxLen > 0 ? Math.max(0, Math.round(((maxLen - minDistance) / maxLen) * 100)) : 0;
     const isSoundexMatch = userSx === targetSx && userSx !== '0000';
 
-    // Evaluation threshold: within 30-35% error margin or soundex with reasonable edit distance
-    const isMatch = (
-      minDistance <= allowedErrorMargin ||
-      (isSoundexMatch && minDistance <= Math.max(2, Math.floor(maxLen * 0.45))) ||
-      (maxLen >= 4 && similarity >= 65) ||
-      (maxLen <= 3 && minDistance <= 1)
-    );
+    let isMatch = false;
+
+    if (strictness === 'strict') {
+      // Strict: Only 1 typo allowed for words of 5+ characters, 0 for shorter words
+      const allowedDistance = maxLen >= 5 ? 1 : 0;
+      isMatch = minDistance <= allowedDistance;
+    } else if (strictness === 'normal') {
+      // Normal (Recommended): Balanced tolerance
+      // max 1 typo for 4-6 chars, max 2 for 7-10 chars, max 3 for 11+ chars
+      const allowedDistance = maxLen <= 3 ? 0 : maxLen <= 6 ? 1 : maxLen <= 10 ? 2 : 3;
+      const validSoundexMatch = isSoundexMatch && minDistance <= 2 && similarity >= 70;
+      isMatch = minDistance <= allowedDistance || validSoundexMatch;
+    } else {
+      // Lenient (Generös): Generous tolerance (30-35% error margin)
+      const allowedErrorMargin = Math.max(1, Math.floor(targetLen * 0.35));
+      const validSoundexMatch = isSoundexMatch && minDistance <= Math.max(2, Math.floor(maxLen * 0.45));
+      isMatch = (
+        minDistance <= allowedErrorMargin ||
+        validSoundexMatch ||
+        (maxLen >= 4 && similarity >= 65) ||
+        (maxLen <= 3 && minDistance <= 1)
+      );
+    }
 
     const confidence = isMatch
       ? Math.min(0.99, Math.max(0.70, (100 - (minDistance * (100 / Math.max(maxLen, 3)))) / 100))

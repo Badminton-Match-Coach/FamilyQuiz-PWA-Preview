@@ -1,9 +1,12 @@
 import { QuizConfig } from '../types';
 
 export const defaultQuiz: QuizConfig = {
+  quizId: 'default-quiz-template',
   title: "Family Summer Quiz",
   password: "123",
   geotagUnlockDistance: 20,
+  requireSequentialAnswers: false,
+  textMatchStrictness: 'normal',
   barnQuestions: [
     {
       id: "b1",
